@@ -3,13 +3,107 @@
 // Native SwiftUI overlay: NSPanel, top-right, always-on-top, Cmd+Shift+Space trigger.
 // Implements the full §3 state machine: mic/text modes, query submission via daemon
 // subprocess, results display with degraded/no-match states, click-to-open in editor,
-// Esc/click-outside dismiss, and reasoner-source badge.
+// Esc/click-outside dismiss, reasoner-source badge, and Compy personality system.
 
 import SwiftUI
 import AppKit
 import Carbon.HIToolbox.Events
-import Speech
-import AVFoundation
+
+// MARK: - Compy Message Pool (Personality System)
+
+/// Cooldown-backed message pools for all user-facing copy.
+/// Each category tracks last-picked index + timestamp in UserDefaults.
+/// Never repeats the same message within a 30-minute window.
+/// Uses weighted selection: 80% standard phrasing, 20% personality.
+struct CompyMessagePool {
+    private static let cooldownKey = "compy.pool.cooldowns"
+    private static let cooldownMinutes: TimeInterval = 30 * 60
+
+    // MARK: - Pools
+
+    /// Greetings shown as placeholder text when the overlay opens.
+    static let greetings: [String] = [
+        "Ask me anything about your code…",
+        "What are you looking for?",
+        "Search your codebase…",
+        "Find a function, trace a call…",
+        "Where is that thing again?",
+        "Codebase at your fingertips…",
+        "Ask away — I'll find it.",
+        "What should I find for you?",
+    ]
+
+    /// Playful result headers — 20% chance instead of "N results".
+    static let resultHeaders: [String] = [
+        "Right where you left it — %d match%@",
+        "Found it lurking in %@: %d hit%@",
+        "Ah, there you are — %d result%@",
+        "%d reference%@, served up.",
+    ]
+
+    /// Varied no-match hints — pool instead of static text.
+    static let noMatchHints: [String] = [
+        "Try rewording with more keywords,\nor include more surrounding code in your selection.",
+        "Nothing turned up — try different words,\nor select the function name before searching.",
+        "Hmm, no matches. Broader keywords?\nOr try selecting the symbol itself.",
+        "No luck — the code might use different terms.\nTry describing what it does instead.",
+        "Nothing found. Maybe the function lives\nin a different file? Try without the selection.",
+        "Zero hits. Sometimes a shorter query\nwith just the symbol name works best.",
+    ]
+
+    // MARK: - Picker
+
+    /// Pick a message from a pool, avoiding repeats within the cooldown window.
+    /// Fallback: if all messages are on cooldown, pick the one with the oldest timestamp.
+    static func pick(from pool: [String], category: String) -> String {
+        guard !pool.isEmpty else { return "" }
+        var cooldowns = loadCooldowns(for: category)
+        let now = Date().timeIntervalSince1970
+
+        // Find messages not on cooldown
+        let available = pool.enumerated().filter { idx, _ in
+            guard let ts = cooldowns[idx] else { return true }
+            return (now - ts) >= cooldownMinutes
+        }
+
+        let chosen: Int
+        if let pick = available.randomElement() {
+            chosen = pick.offset
+        } else {
+            // All on cooldown — pick the oldest
+            chosen = cooldowns.min(by: { ($0.value ) < ($1.value ) })?.key ?? Int.random(in: 0..<pool.count)
+        }
+
+        cooldowns[chosen] = now
+        saveCooldowns(cooldowns, for: category)
+        return pool[chosen]
+    }
+
+    /// Returns true ~20% of the time for personality seasoning.
+    static func shouldUsePersonality() -> Bool {
+        Int.random(in: 0..<5) == 0
+    }
+
+    // MARK: - UserDefaults
+
+    private static func loadCooldowns(for category: String) -> [Int: TimeInterval] {
+        guard let data = UserDefaults.standard.data(forKey: "\(cooldownKey).\(category)"),
+              let dict = try? JSONDecoder().decode([String: TimeInterval].self, from: data)
+        else { return [:] }
+        var result: [Int: TimeInterval] = [:]
+        for (key, value) in dict {
+            guard let intKey = Int(key) else { continue }
+            result[intKey] = value
+        }
+        return result
+    }
+
+    private static func saveCooldowns(_ dict: [Int: TimeInterval], for category: String) {
+        let stringKeyed = dict.reduce(into: [:]) { $0[String($1.key)] = $1.value }
+        guard let data = try? JSONEncoder().encode(stringKeyed) else { return }
+        UserDefaults.standard.set(data, forKey: "\(cooldownKey).\(category)")
+    }
+}
 
 // MARK: - Editor Opener
 
@@ -121,9 +215,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         workspaceRoot: String? = nil
     ) {
         // Always reset transient state so the overlay starts clean.
-        // (Previously only reset when panel != nil, which leaked stale phase like
-        // .results across dismiss/re-open cycles, breaking compact sizing.)
         state.reset()
+        // Pick a fresh greeting each time the overlay opens.
+        state.greeting = CompyMessagePool.pick(from: CompyMessagePool.greetings, category: "greetings")
 
         state.selectionText = selectedText ?? ""
         state.selectionFile = file
@@ -231,18 +325,24 @@ final class OverlayState: ObservableObject {
     @Published var reasonText: String? = nil
     @Published var isRecording: Bool = false
     @Published var sttError: String? = nil
+    @Published var sttPhase: String = ""  // "Recording…" / "Transcribing…" during whisper.cpp run
+
+    /// Fresh greeting each overlay open — shown as input bar placeholder.
+    @Published var greeting: String = "Ask me anything about your code…"
+
+    /// Personality-flavored result header text (set when results come in, 20% chance).
+    @Published var resultHeaderText: String = ""
+
+    /// No-match hint — picked from pool each time no-match shows.
+    @Published var noMatchHint: String = ""
 
     var selectionText: String = ""
     var selectionFile: String? = nil
     var selectionLine: Int? = nil
     var workspaceRoot: String? = nil
 
-    // Speech recognition state — must live on a class (ObservableObject) since
-    // AVAudioEngine callbacks need stable references.
-    let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))!
-    let audioEngine = AVAudioEngine()
-    var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    var recognitionTask: SFSpeechRecognitionTask?
+    /// Active whisper.cpp subprocess — nil when not recording.
+    var sttProcess: Process?
 
     /// Dominant source across all hits (e.g. "freebuff", "heuristic", "grep").
     var sourceLabel: String {
@@ -266,17 +366,18 @@ final class OverlayState: ObservableObject {
         reasonText = nil
         isRecording = false
         sttError = nil
+        sttPhase = ""
+        resultHeaderText = ""
+        // noMatchHint picked lazily when .noMatch displays
+        noMatchHint = ""
     }
 
-    /// Stop any active speech recognition.
+    /// Kill the whisper.cpp subprocess if running.
     func stopRecording() {
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-        recognitionRequest = nil
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        sttProcess?.terminate()
+        sttProcess = nil
         isRecording = false
+        sttPhase = ""
         mode = .text
     }
 }
@@ -332,6 +433,7 @@ struct OverlayView: View {
             }
         }
         .onDisappear {
+            state.stopRecording()
             if let monitor = escMonitor {
                 NSEvent.removeMonitor(monitor)
                 escMonitor = nil
@@ -343,11 +445,11 @@ struct OverlayView: View {
 
     private var inputBar: some View {
         HStack(spacing: 12) {
-            // Mic button — triggers STT recording or switches to text mode.
+            // Mic button — triggers whisper.cpp recording or switches to text mode.
             micButton
 
             if state.mode == .mic && !isFocused && state.text.isEmpty && !state.isRecording {
-                Text("Speak a query or click to type...")
+                Text(state.greeting)
                     .font(.system(size: 18))
                     .foregroundColor(Color(NSColor.placeholderTextColor))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -389,7 +491,7 @@ struct OverlayView: View {
         .background(Color(NSColor.controlBackgroundColor))
     }
 
-    // MARK: - Mic Button (STT)
+    // MARK: - Mic Button (whisper.cpp STT)
 
     private var micButton: some View {
         Button(action: {
@@ -402,10 +504,28 @@ struct OverlayView: View {
                 isFocused = false
             }
         }) {
-            Image(systemName: micButtonIcon)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(micButtonColor)
-                .frame(width: 22)
+            ZStack {
+                // Expanding rings when recording — concentric pulse
+                if state.isRecording {
+                    ForEach(0..<3, id: \.self) { i in
+                        Circle()
+                            .stroke(Color.red.opacity(0.3), lineWidth: 1.5)
+                            .frame(width: 14 + CGFloat(i) * 6, height: 14 + CGFloat(i) * 6)
+                            .scaleEffect(state.isRecording ? 1.8 : 1.0)
+                            .opacity(state.isRecording ? 0 : 0.5)
+                            .animation(
+                                state.isRecording
+                                    ? .easeOut(duration: 1.2).repeatForever(autoreverses: false).delay(Double(i) * 0.25)
+                                    : .none,
+                                value: state.isRecording
+                            )
+                    }
+                }
+                Image(systemName: micButtonIcon)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(micButtonColor)
+            }
+            .frame(width: 28, height: 28)
         }
         .buttonStyle(.plain)
         .help(state.isRecording ? "Click to stop recording" : (state.mode == .mic ? "Click to start recording" : "Switch to mic mode"))
@@ -423,17 +543,18 @@ struct OverlayView: View {
         return isFocused ? .accentColor : .secondary
     }
 
-    // MARK: - Recording Indicator (shows live transcription)
+    // MARK: - Recording Indicator
 
     private var recordingIndicator: some View {
         HStack(spacing: 8) {
+            // Pulsing red dot
             Circle()
                 .fill(Color.red)
                 .frame(width: 8, height: 8)
                 .scaleEffect(1.3)
                 .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: state.isRecording)
             if state.text.isEmpty {
-                Text("Listening...")
+                Text(state.sttPhase.isEmpty ? "Listening…" : state.sttPhase)
                     .font(.system(size: 18, weight: .medium))
                     .foregroundColor(.secondary)
             } else {
@@ -446,20 +567,15 @@ struct OverlayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - STT Recording (Apple Speech framework — live transcription)
+    // MARK: - STT Recording (whisper.cpp via daemon subprocess)
 
     /// Shared repo root resolution — canonical path for daemon cwd.
-    /// Resolves symlinks and standardizes to get the true filesystem path
-    /// (prevents case-mismatch issues on case-insensitive APFS volumes).
-    ///
-    /// Static form available for callers outside OverlayView (e.g. CompAppDelegate).
     static func resolveRepoRoot() -> URL {
         let raw: URL
         if let env = ProcessInfo.processInfo.environment["COMPY_ROOT"] {
             raw = URL(fileURLWithPath: env)
         } else {
             // #file is compy/swift/Sources/Compy/OverlayPanel.swift.
-            // Walk up 5 levels to reach the project root.
             raw = URL(fileURLWithPath: #file)
                 .deletingLastPathComponent()  // Sources/Compy
                 .deletingLastPathComponent()  // Sources
@@ -472,77 +588,85 @@ struct OverlayView: View {
 
     private var repoRoot: URL { Self.resolveRepoRoot() }
 
+    /// Spawn whisper.cpp recording: burst-capture 4s of mic audio,
+    /// transcribe, set text. Push-to-talk model — click to record, click to stop.
+    /// Continuous: restarts after each burst with 400ms backoff.
     private func startRecording() {
-        // Build on whatever is already typed or previously recognized.
         state.recognizedTextPrefix = state.text
-        SFSpeechRecognizer.requestAuthorization { status in
-            DispatchQueue.main.async {
-                guard status == .authorized else {
-                    self.state.isRecording = false
-                    self.state.sttError = "Mic access denied — enable in System Settings > Privacy > Speech Recognition"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.state.sttError = nil }
-                    return
-                }
-                self._beginRecognition()
-            }
-        }
+        state.isRecording = true
+        state.sttError = nil
+        state.sttPhase = "Recording 4s…"
+        _runWhisperBurst()
     }
 
     private func stopRecording() {
         state.stopRecording()
     }
 
-    private func _beginRecognition() {
-        // Cancel any ongoing task before starting a new one.
-        state.recognitionTask?.cancel()
-        state.recognitionTask = nil
+    /// Run one whisper.cpp burst: spawn python3 -m compy.daemon.stt --duration 4,
+    /// parse JSON, set text, optionally restart.
+    private func _runWhisperBurst() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            proc.arguments = ["python3", "-m", "compy.daemon.stt", "--duration", "4"]
+            proc.currentDirectoryURL = repoRoot
 
-        state.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest = state.recognitionRequest else { return }
+            let stdoutPipe = Pipe()
+            proc.standardOutput = stdoutPipe
+            proc.standardError = FileHandle.nullDevice
 
-        let inputNode = state.audioEngine.inputNode
-        recognitionRequest.shouldReportPartialResults = true
+            // Store on the calling thread so stopRecording() can find it even
+            // before the main-queue dispatch below fires. Not @Published, safe.
+            state.sttProcess = proc
 
-        state.isRecording = true
-        state.sttError = nil
-
-        state.recognitionTask = state.speechRecognizer.recognitionTask(with: recognitionRequest) { [weak state] result, error in
-            guard let state = state else { return }
-
-            if let result = result {
-                let transcribed = result.bestTranscription.formattedString
-                DispatchQueue.main.async {
-                    // Show prefix + current partial transcription in real time.
-                    state.text = [state.recognizedTextPrefix, transcribed]
-                        .filter { !$0.isEmpty }
-                        .joined(separator: " ")
-                }
-            }
-
-            if error != nil || result?.isFinal == true {
-                // Guard against double-fire: stopRecording() may have already run.
-                guard state.recognitionRequest != nil else { return }
+            proc.terminationHandler = { [weak state] _ in
+                guard let state = state else { return }
+                let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let jsonStr = String(data: data, encoding: .utf8) ?? ""
 
                 DispatchQueue.main.async {
-                    state.audioEngine.stop()
-                    inputNode.removeTap(onBus: 0)
-                    state.recognitionRequest = nil
-                    state.recognitionTask = nil
+                    guard state.isRecording else { return }
 
+                    if let jsonData = jsonStr.data(using: .utf8),
+                       let result = try? JSONDecoder().decode(STTResult.self, from: jsonData) {
+                        if result.success, !result.text.isEmpty {
+                            // Append burst result to accumulated text
+                            state.text = [state.recognizedTextPrefix, result.text]
+                                .filter { !$0.isEmpty }
+                                .joined(separator: " ")
+                            state.recognizedTextPrefix = state.text
+                            state.sttPhase = ""
+                        } else if let err = result.error, !err.isEmpty {
+                            state.sttError = err
+                        }
+                    } else if !jsonStr.isEmpty {
+                        // whisper-cli may output raw text without JSON wrapper.
+                        // Strip Metal/ggml init lines that leak to stdout.
+                        let cleaned = jsonStr
+                            .split(separator: "\n")
+                            .filter { !$0.hasPrefix("ggml_") && !$0.hasPrefix("load_backend") }
+                            .joined(separator: " ")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleaned.isEmpty {
+                            state.text = [state.recognizedTextPrefix, cleaned]
+                                .filter { !$0.isEmpty }
+                                .joined(separator: " ")
+                            state.recognizedTextPrefix = state.text
+                            state.sttPhase = ""
+                        }
+                    }
+
+                    // Restart for continuous listening
                     if state.isRecording {
-                        // User hasn't stopped — persist final text and restart
-                        // for continuous listening until the mic button is clicked.
-                        state.recognizedTextPrefix = state.text
-                        // Brief backoff prevents a tight infinite loop on
-                        // persistent mic/recognition errors.
                         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) {
                             guard state.isRecording else { return }
-                            self._beginRecognition()
+                            state.sttPhase = "Recording 4s…"
+                            self._runWhisperBurst()
                         }
                     } else {
                         state.mode = .text
-                        if error != nil && state.text.isEmpty {
-                            state.sttError = "Recognition error — try again"
+                        if state.sttError != nil && state.text.isEmpty {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                                 state.sttError = nil
                             }
@@ -550,26 +674,18 @@ struct OverlayView: View {
                     }
                 }
             }
-        }
 
-        let format = inputNode.outputFormat(forBus: 0)
-        inputNode.removeTap(onBus: 0)  // ensure fresh tap when restarting
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak state] buffer, _ in
-            state?.recognitionRequest?.append(buffer)
-        }
-
-        state.audioEngine.prepare()
-        do {
-            try state.audioEngine.start()
-        } catch {
-            state.audioEngine.stop()
-            inputNode.removeTap(onBus: 0)
-            state.recognitionRequest = nil
-            state.recognitionTask = nil
-            state.isRecording = false
-            state.sttError = "Microphone unavailable — check mic permissions"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { state.sttError = nil }
-            return
+            do {
+                try proc.run()
+            } catch {
+                DispatchQueue.main.async {
+                    state.isRecording = false
+                    state.sttPhase = ""
+                    state.sttError = "whisper.cpp unavailable — install with: brew install whisper-cpp"
+                    state.mode = .text
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { state.sttError = nil }
+                }
+            }
         }
     }
 
@@ -626,32 +742,29 @@ struct OverlayView: View {
     // MARK: - Processing State
 
     /// Randomized message pool — shuffles categories each search for variety.
-    /// Three pools (intro, mid, outro) shuffled independently so the sequence
-    /// always feels fresh but still tells a coherent progress story.
     private var progressMessages: [String] {
         let intros = [
-            "Scanning the codebase...",
-            "Reading through files...",
-            "Exploring the repo...",
-            "Gathering context...",
-            "Looking around...",
+            "Scanning the codebase…",
+            "Reading through files…",
+            "Exploring the repo…",
+            "Gathering context…",
+            "Looking around…",
         ].shuffled()
         let mids = [
-            "Consulting the graph...",
-            "Matching keywords...",
-            "Running heuristics...",
-            "Tracing symbols...",
-            "Checking references...",
-            "Following the trail...",
-            "Connecting the dots...",
-            "Mapping dependencies...",
+            "Consulting the graph…",
+            "Matching keywords…",
+            "Running heuristics…",
+            "Tracing symbols…",
+            "Checking references…",
+            "Following the trail…",
+            "Connecting the dots…",
+            "Mapping dependencies…",
         ].shuffled()
         let outros = [
-            "Ranking results...",
-            "Polishing...",
-            "Almost there...",
+            "Ranking results…",
+            "Polishing…",
+            "Almost there…",
         ].shuffled()
-        // Pick 2 intros, 3 mids, 1 outro for a fresh but logical sequence.
         return [intros[0], intros[1], mids[0], mids[1], mids[2], outros[0]]
     }
 
@@ -670,7 +783,7 @@ struct OverlayView: View {
             Text("No results")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.primary)
-            Text("Try rewording with more keywords,\nor include more surrounding code in your selection.")
+            Text(state.noMatchHint)
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -696,8 +809,8 @@ struct OverlayView: View {
 
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(state.results) { hit in
-                        ResultRow(hit: hit)
+                    ForEach(Array(state.results.enumerated()), id: \.element.id) { index, hit in
+                        ResultRow(hit: hit, index: index)
                     }
                 }
                 .padding(12)
@@ -709,7 +822,7 @@ struct OverlayView: View {
 
     private var resultHeader: some View {
         HStack {
-            Text("\(state.results.count) result\(state.results.count == 1 ? "" : "s")")
+            Text(resultHeaderCopy)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.secondary)
 
@@ -726,6 +839,15 @@ struct OverlayView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 4)
+    }
+
+    /// 80% standard count, 20% personality phrasing.
+    private var resultHeaderCopy: String {
+        if !state.resultHeaderText.isEmpty {
+            return state.resultHeaderText
+        }
+        let n = state.results.count
+        return "\(n) result\(n == 1 ? "" : "s")"
     }
 
     private var sourceBadgeColor: Color {
@@ -756,16 +878,37 @@ struct OverlayView: View {
         .padding(.top, 12)
     }
 
+    // MARK: - Haptics
+
+    /// Light tap — query submitted.
+    private func hapticSubmit() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+    }
+
+    /// Double-tap — results ready.
+    private func hapticSuccess() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+    }
+
+    /// Warning tap — no results or error.
+    private func hapticNoMatch() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+    }
+
     // MARK: - Daemon Call
 
     private func submitQuery() {
         guard !state.text.isEmpty else { return }
+        guard state.phase != .processing else { return }  // prevent rapid-fire submits
         let question = state.text
+
+        hapticSubmit()
 
         withAnimation(.easeOut(duration: 0.15)) {
             state.phase = .processing
             state.results = []
             state.reasonText = nil
+            state.resultHeaderText = ""
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -792,6 +935,8 @@ struct OverlayView: View {
             guard let jsonData = try? compyEncoder.encode(request) else {
                 _debugLog("FAIL: JSON encode failed for question='\(question)'")
                 DispatchQueue.main.async {
+                    hapticNoMatch()
+                    state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
                     withAnimation(.easeOut(duration: 0.2)) { state.phase = .noMatch }
                 }
                 return
@@ -845,6 +990,8 @@ struct OverlayView: View {
                 if exitCode != 0 {
                     let reason = stderrStr.isEmpty ? "daemon exit \(exitCode)" : "daemon: \(stderrStr)"
                     DispatchQueue.main.async {
+                        hapticNoMatch()
+                        state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
                         withAnimation(.easeOut(duration: 0.2)) {
                             state.phase = .noMatch
                             state.reasonText = reason
@@ -855,6 +1002,23 @@ struct OverlayView: View {
 
                 if let result = try? compyDecoder.decode(QueryResult.self, from: outData) {
                     DispatchQueue.main.async {
+                        let n = result.hits.count
+                        // 20% chance of personality-flavored result header
+                        if n > 0 && CompyMessagePool.shouldUsePersonality() {
+                            let template = CompyMessagePool.pick(from: CompyMessagePool.resultHeaders, category: "resultHeaders")
+                            if template.contains("%@") {
+                                let source = state.sourceLabel.capitalized
+                                // Replace only the FIRST %@ (source name); keep %@ for plural "s".
+                                if let range = template.range(of: "%@") {
+                                    let replaced = template.replacingCharacters(in: range, with: source)
+                                    state.resultHeaderText = String(format: replaced, n, n == 1 ? "" : "s")
+                                } else {
+                                    state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
+                                }
+                            } else {
+                                state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
+                            }
+                        }
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
                             state.reasonText = result.reason
@@ -864,17 +1028,27 @@ struct OverlayView: View {
                                 state.phase = result.degraded ? .degraded : .results
                             }
                         }
+                        if result.hits.isEmpty {
+                            hapticNoMatch()
+                            state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
+                        } else {
+                            hapticSuccess()
+                        }
                     }
                 } else {
                     let preview = String(data: outData.prefix(200), encoding: .utf8) ?? "<binary>"
                     _debugLog("FAIL: JSON decode failed. outData preview: \(preview)")
                     DispatchQueue.main.async {
+                        hapticNoMatch()
+                        state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
                         withAnimation(.easeOut(duration: 0.2)) { state.phase = .noMatch }
                     }
                 }
             } catch {
                 _debugLog("FAIL: exception: \(error.localizedDescription)")
                 DispatchQueue.main.async {
+                    hapticNoMatch()
+                    state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
                     withAnimation(.easeOut(duration: 0.2)) { state.phase = .noMatch }
                 }
             }
@@ -902,7 +1076,9 @@ struct OverlayView: View {
 
 struct ResultRow: View {
     let hit: RankedHit
+    let index: Int
     @State private var isHovered = false
+    @State private var appeared = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -922,11 +1098,12 @@ struct ResultRow: View {
             Text(hit.snippet.trimmingCharacters(in: .whitespacesAndNewlines))
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(.secondary)
-                .lineLimit(2)
+                .lineLimit(isHovered ? 8 : 2)
                 .padding(6)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(NSColor.textBackgroundColor))
                 .cornerRadius(4)
+                .animation(.easeOut(duration: 0.2), value: isHovered)
         }
         .padding(8)
         .background(
@@ -935,6 +1112,13 @@ struct ResultRow: View {
                     ? Color(NSColor.quaternaryLabelColor)
                     : Color.clear)
         )
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : 8)
+        .onAppear {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8).delay(Double(index) * 0.04)) {
+                appeared = true
+            }
+        }
         .onHover { hovering in
             isHovered = hovering
             if hovering {
@@ -989,7 +1173,7 @@ struct TypingProgressView: View {
     }
 
     private var currentMessage: String {
-        guard !messages.isEmpty else { return "Working..." }
+        guard !messages.isEmpty else { return "Working…" }
         return messages[messageIndex % messages.count]
     }
 
