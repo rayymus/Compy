@@ -1,0 +1,36 @@
+{
+  "name": "compy-companion",
+  "displayName": "Compy Companion",
+  "description": "Selection capture for Compy — writes {file, line, workspaceRoot, selectedText} to a local socket when the global hotkey fires.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["*"],
+  "main": "out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "compy.companion.hotkey",
+        "title": "Compy: Capture Selection"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "compy.companion.hotkey",
+        "key": "cmd+shift+space",
+        "mac": "cmd+shift+space",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -watch -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,26 @@
+# Generated outputs
+.graphify-out/
+.graphify_python
+
+# OS metadata
+**/.DS_Store
+
+# Skills and workflow (project-local, not for distribution)
+.skills/
+.agent/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Swift build artifacts
+**/.build/
+*.dSYM/
+
+# VS Code extension compiled output
+compy/extension/out/
+compy/extension/node_modules/
+
+# Runtime temp files
+/tmp/compy-*
