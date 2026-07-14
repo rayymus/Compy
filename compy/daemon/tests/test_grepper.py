@@ -52,10 +52,22 @@ def test_ripgrep_finds_hits_in_temp_py_repo(tmp_path: Path):
 
     rg = RipgrepGrepper(rg_path=RG or "rg")
     hits = rg.grep("foo", str(tmp_path))
-    # .txt files are filtered out by the grepper's denylist.
-    # Only .py files should appear.
+    # .txt is no longer in the denylist — all three files should appear.
     filenames = {Path(h.file).name for h in hits}
-    assert filenames == {"a.py", "b.py"}
+    assert filenames == {"a.py", "b.py", "c.txt"}
+
+
+@pytestmark_real
+def test_ripgrep_denylist_filters_minified_js(tmp_path: Path):
+    """Compiled/minified files should still be excluded."""
+    (tmp_path / "src.js").write_text("function foo() { return 1; }\n")
+    (tmp_path / "src.min.js").write_text("function foo(){return 1;}\n")
+
+    rg = RipgrepGrepper(rg_path=RG or "rg")
+    hits = rg.grep("foo", str(tmp_path))
+    filenames = {Path(h.file).name for h in hits}
+    assert "src.js" in filenames
+    assert "src.min.js" not in filenames  # .min.js is in denylist
 
 
 @pytestmark_real
