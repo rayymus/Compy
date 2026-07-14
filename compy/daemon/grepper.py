@@ -28,17 +28,41 @@ _COMMENT_ONLY_RE = re.compile(
 class RipgrepGrepper:
     """Real ripgrep adapter. `rg --json` emits one JSON object per line of output."""
 
+    # Denylist globs — exclude known non-code files (docs, configs, locks, data, images).
+    # This keeps all languages searchable while filtering out noise.
+    _SKIP_GLOBS: tuple[str, ...] = (
+        "!*.txt", "!*.md", "!*.mdx", "!*.rst", "!*.adoc",
+        "!*.json", "!*.lock", "!*.toml", "!*.cfg", "!*.ini", "!*.yaml", "!*.yml",
+        "!*.log", "!*.csv", "!*.tsv",
+        "!*.xml", "!*.svg", "!*.html", "!*.css", "!*.scss", "!*.less",
+        "!*.png", "!*.jpg", "!*.jpeg", "!*.gif", "!*.ico", "!*.webp", "!*.svg",
+        "!*.pdf", "!*.ttf", "!*.woff", "!*.woff2", "!*.eot",
+        "!*.map", "!*.min.js", "!*.min.css",
+        "!package-lock.json", "!yarn.lock", "!pnpm-lock.yaml", "!Cargo.lock",
+        "!Gemfile.lock", "!poetry.lock", "!Pipfile.lock",
+        "!*.pyc", "!*.pyo", "!*.class", "!*.o", "!*.obj", "!*.so", "!*.dylib",
+        "!*.d.ts", "!*.d.mts",
+        "!*.pb.go", "!*.pb.cc",
+        "!*.sum",
+        "!__pycache__/*", "!node_modules/*", "!.git/*",
+    )
+
     def __init__(self, rg_path: str = "rg", max_results: int = 50) -> None:
         self._rg = rg_path
         self._cap = max_results
 
     def grep(self, pattern: str, workspace_root: str) -> tuple[GrepHit, ...]:
+        # Build -g globs to exclude known non-code files (denylist, not whitelist).
+        glob_args: list[str] = []
+        for ext in self._SKIP_GLOBS:
+            glob_args.extend(("-g", ext))
         try:
             proc = subprocess.run(
                 [
                     self._rg, "--json", "--no-heading", "--line-number",
                     "--max-count", str(self._cap),
                     "--context", "1",  # 1 line of context before/after each match
+                    *glob_args,
                     "-e", pattern, workspace_root,
                 ],
                 capture_output=True,

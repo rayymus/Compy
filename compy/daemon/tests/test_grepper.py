@@ -52,11 +52,10 @@ def test_ripgrep_finds_hits_in_temp_py_repo(tmp_path: Path):
 
     rg = RipgrepGrepper(rg_path=RG or "rg")
     hits = rg.grep("foo", str(tmp_path))
-    # rg matches by content regardless of extension — all three files contain `foo`, so
-    # all three must show up in hits. File-type filtering is a caller concern, not the
-    # grepper's; the daemon surfaces whatever rg returns.
+    # .txt files are filtered out by the grepper's denylist.
+    # Only .py files should appear.
     filenames = {Path(h.file).name for h in hits}
-    assert filenames == {"a.py", "b.py", "c.txt"}
+    assert filenames == {"a.py", "b.py"}
 
 
 @pytestmark_real

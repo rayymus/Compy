@@ -34,6 +34,8 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"\bwhere\b.*\bdefined\b|\bdefinition of\b|\bfind def\b|\bthe def of\b", "definition"),
     # Convention / precedent: how do we normally do X.
     (r"\bhow (do|should) (we|i|you)\b|\bwhat('s| is) the pattern\b|\bshow (me |)(examples?|usages?)\b|\bconvention for\b|\bhow (is|are)\b.*\b(typically|usually|normally)\b", "convention"),
+    # Dedup check: does this already exist? (same mechanism as convention, different trigger).
+    (r"\bdoes this (already )?exist\b|\bis there (already )\b|\bduplicate of\b|\banyone (already )?(done|wrote|built)\b|\bhas this (been |)(done|written|built)\b|\bis (this|that|it) (a |)(duplicate|similar)\b", "dedup"),
     # Fuzzy: catch-all for natural-language search.
     (r"\bwhere is\b|\bfind\b|\bwhat (does|is|handles?)\b", "fuzzy"),
 )

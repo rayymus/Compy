@@ -156,8 +156,9 @@ def _evaluate(
     if parsed.confidence < FUZZY_THRESHOLD:
         parsed = replace(parsed, intent="fuzzy")
 
-    # Convention path: "how do we normally do X" → fuzzy search with selection
-    if parsed.intent == "convention":
+    # Convention / dedup path: "how do we normally do X" or "does this exist already"
+    # Both route to fuzzy semantic search (same capability, different trigger).
+    if parsed.intent in ("convention", "dedup"):
         parsed = replace(parsed, intent="fuzzy")
 
     # Structured path: parse a symbol, search it.

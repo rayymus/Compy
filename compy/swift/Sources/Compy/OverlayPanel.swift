@@ -322,6 +322,8 @@ final class OverlayState: ObservableObject {
     @Published var phase: Phase = .empty
     @Published var text: String = ""
     @Published var results: [RankedHit] = []
+    /// Previous query results — preserved during multi-turn sessions, shown dimmed.
+    @Published var previousResults: [RankedHit] = []
     @Published var reasonText: String? = nil
     @Published var isRecording: Bool = false
     @Published var sttError: String? = nil
@@ -486,6 +488,7 @@ final class OverlayState: ObservableObject {
         text = ""
         recognizedTextPrefix = ""
         results = []
+        previousResults = []
         reasonText = nil
         isRecording = false
         sttError = nil
@@ -929,8 +932,35 @@ struct OverlayView: View {
     }
 
     private var processingState: some View {
-        TypingProgressView(messages: progressMessages)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            TypingProgressView(messages: progressMessages)
+                .frame(maxWidth: .infinity)
+
+            // Show previous results dimmed — session memory across queries.
+            if !state.previousResults.isEmpty {
+                Divider()
+                    .padding(.horizontal, 12)
+                HStack {
+                    Text("Previous results")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(Array(state.previousResults.enumerated()), id: \.element.id) { index, hit in
+                            ResultRow(hit: hit, index: index)
+                                .opacity(0.35)
+                                .allowsHitTesting(false)  // prevent accidental clicks during processing
+                        }
+                    }
+                    .padding(12)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - No Match State
@@ -1068,6 +1098,8 @@ struct OverlayView: View {
 
         withAnimation(.easeOut(duration: 0.15)) {
             state.phase = .processing
+            // Preserve previous results dimmed (session memory) while new query runs.
+            state.previousResults = state.results
             state.results = []
             state.reasonText = nil
             state.resultHeaderText = ""
@@ -1182,6 +1214,7 @@ struct OverlayView: View {
                                 state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
                             }
                         }
+                        state.previousResults = []  // clear old results on success
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
                             state.reasonText = result.reason

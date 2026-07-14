@@ -187,3 +187,20 @@ def test_convention_show_me_examples():
 def test_convention_typically():
     parsed = _parse("how is authentication typically done")
     assert parsed.intent == "convention"
+
+
+# ---------- dedup intent -----------------------------------------------------
+
+def test_dedup_does_this_exist():
+    parsed = _parse("does this already exist")
+    assert parsed.intent == "dedup"
+
+
+def test_dedup_duplicate_of():
+    parsed = _parse("duplicate of the auth handler")
+    assert parsed.intent == "dedup"
+
+
+def test_dedup_anyone_wrote():
+    parsed = _parse("anyone already wrote a rate limiter")
+    assert parsed.intent == "dedup"
