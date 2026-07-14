@@ -18,6 +18,7 @@ from .models import (
     RankedHit,
     Selection,
 )
+from .parser import _extract_trace_frames, _is_trace_input
 
 # TBD-before-impl tunable per spec §2a. 0.6 is the documented starting guess — measure on
 # real queries, tighten later.
@@ -82,15 +83,40 @@ def _evaluate(
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
-    # --- Graphify path: relational queries ("what calls X", "who imports Y") ---
-    if parsed.intent == "relational" and grapher is not None:
+    # --- Trace path: stack traces get zero-LLM structural search ---
+    if parsed.intent == "trace":
+        # Check the question text first — that's where the user pasted the trace.
+        # Fall back to selection text only if the question is very short.
+        trace_text = question if len(question) > 40 else (sel_text or question)
+        if _is_trace_input(trace_text):
+            frames = _extract_trace_frames(trace_text)
+            if frames:
+                trace_hits: list[RankedHit] = []
+                for file, line in frames:
+                    try:
+                        snippet = _read_line(file, line, workspace)
+                    except (OSError, ValueError):
+                        snippet = f"{file}:{line}"
+                    trace_hits.append(RankedHit(
+                        file=file, line=line, snippet=snippet,
+                        score=1.0, source="trace",
+                    ))
+                if trace_hits:
+                    return parsed, tuple(trace_hits), False, None
+        # No frames extracted — fall through to fuzzy.
+        parsed = replace(parsed, intent="fuzzy")
+
+    # --- Graphify path: relational + blast radius queries ---
+    if parsed.intent in ("relational", "blast_radius") and grapher is not None:
         try:
             grapher.load(workspace)
         except ReasonerUnavailable:
             pass  # Fall through — graph unavailable, try fuzzy grep.
         else:
             # "callers of" / "who calls" → callers; "what does X call" → calls
-            if ("callers of" in question.lower() or "who calls" in question.lower()):
+            if parsed.intent == "blast_radius":
+                sub_intent = "blast_radius"
+            elif ("callers of" in question.lower() or "who calls" in question.lower()):
                 sub_intent = "callers"
             elif "calls" in question.lower():
                 sub_intent = "calls"
@@ -112,8 +138,8 @@ def _evaluate(
         # Graph returned empty — fall through to fuzzy grep.
         parsed = replace(parsed, intent="fuzzy")
 
-    # --- Git history path: historical queries ("why was X changed") ---
-    if parsed.intent == "history" and historian is not None:
+    # --- Git history path: history + rationale queries ---
+    if parsed.intent in ("history", "rationale") and historian is not None:
         candidates = historian.query_history(question, workspace)
         if not candidates and selection:
             candidates = historian.query_file_history(sel_file or "", workspace)
@@ -128,6 +154,10 @@ def _evaluate(
 
     # Confidence-too-low drops into fuzzy (spec §2a).
     if parsed.confidence < FUZZY_THRESHOLD:
+        parsed = replace(parsed, intent="fuzzy")
+
+    # Convention path: "how do we normally do X" → fuzzy search with selection
+    if parsed.intent == "convention":
         parsed = replace(parsed, intent="fuzzy")
 
     # Structured path: parse a symbol, search it.
@@ -224,3 +254,20 @@ def _selection_text(sel: Selection | None) -> str | None:
 
 def _first_keyword(keywords: tuple[str, ...]) -> str | None:
     return keywords[0] if keywords else None
+
+
+def _read_line(file: str, line: int, workspace: str) -> str:
+    """Read a specific line from a file, or return file:line if unreadable."""
+    from pathlib import Path
+
+    # Always resolve workspace to absolute so relative paths work.
+    path = Path(workspace).resolve() / file
+    if not path.exists():
+        return f"{file}:{line}"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if 1 <= line <= len(lines):
+            return lines[line - 1][:300]
+    except (OSError, UnicodeDecodeError):
+        pass
+    return f"{file}:{line}"

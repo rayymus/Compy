@@ -5,6 +5,7 @@ Coverage:
   - Symbol extraction from selection (snake_case preferred, longest-tok fallback).
   - Confidence boost when both selection and extractable symbol are present.
   - Edge cases: empty question, empty selection, ambiguous wording.
+  - New intents: trace, rationale, blast_radius, convention.
 """
 
 from __future__ import annotations
@@ -111,3 +112,78 @@ def test_references_still_works_after_new_rules():
     """Regression: existing intent rules must still match after adding new ones."""
     parsed = _parse("where else is get_ability used", selection="def get_ability(self): pass")
     assert parsed.intent == "references"
+
+
+# ---------- trace intent ----------------------------------------------------
+
+def test_trace_intent_python_traceback():
+    parsed = _parse(
+        'Traceback (most recent call last):\n  File "src/app.py", line 42, in handler\n    result = process()\n  File "src/utils.py", line 17, in process\n    raise ValueError("oops")'
+    )
+    assert parsed.intent == "trace"
+
+
+def test_trace_intent_file_line_pattern():
+    parsed = _parse('File "src/main.py", line 100, in run')
+    assert parsed.intent == "trace"
+
+
+def test_trace_intent_at_pattern():
+    parsed = _parse("at /src/app.js:15:8")
+    assert parsed.intent == "trace"
+
+
+# ---------- rationale intent ------------------------------------------------
+
+def test_rationale_why_does_this_exist():
+    parsed = _parse("why does this null check exist")
+    assert parsed.intent == "rationale"
+
+
+def test_rationale_explain_this():
+    parsed = _parse("explain this workaround")
+    assert parsed.intent == "rationale"
+
+
+def test_rationale_reason_for():
+    parsed = _parse("reason for the fallback logic")
+    assert parsed.intent == "rationale"
+
+
+# ---------- blast_radius intent ---------------------------------------------
+
+def test_blast_radius_what_breaks():
+    parsed = _parse("what breaks if I change get_ability")
+    assert parsed.intent == "blast_radius"
+
+
+def test_blast_radius_what_depends():
+    parsed = _parse("what depends on authenticate")
+    assert parsed.intent == "blast_radius"
+
+
+def test_blast_radius_impact_of():
+    parsed = _parse("impact of changing the config parser")
+    assert parsed.intent == "blast_radius"
+
+
+# ---------- convention intent -----------------------------------------------
+
+def test_convention_how_do_we():
+    parsed = _parse("how do we handle errors here")
+    assert parsed.intent == "convention"
+
+
+def test_convention_whats_the_pattern():
+    parsed = _parse("what's the pattern for logging")
+    assert parsed.intent == "convention"
+
+
+def test_convention_show_me_examples():
+    parsed = _parse("show me examples of middleware setup")
+    assert parsed.intent == "convention"
+
+
+def test_convention_typically():
+    parsed = _parse("how is authentication typically done")
+    assert parsed.intent == "convention"

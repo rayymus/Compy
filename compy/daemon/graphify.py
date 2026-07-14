@@ -349,9 +349,25 @@ class GraphQuerier:
             "callers": self.query_callers,
             "imports": self.query_imports,
             "subclasses": self.query_subclasses,
+            "blast_radius": self.query_blast_radius,
         }
         method = mapping.get(intent, self.query_calls)
         return method(symbol)
+
+    def query_blast_radius(self, symbol: str) -> tuple[GrepHit, ...]:
+        """What depends on this symbol? Returns callers + importers + subclasses."""
+        callers = self.query_callers(symbol)
+        importers = self._query_edges(symbol, "imports", direction="in")
+        subclasses = self.query_subclasses(symbol)
+        # Merge and deduplicate by (file, line).
+        seen: set[tuple[str, int]] = set()
+        merged: list[GrepHit] = []
+        for hit in (*callers, *importers, *subclasses):
+            key = (hit.file, hit.line)
+            if key not in seen:
+                seen.add(key)
+                merged.append(hit)
+        return tuple(merged)
 
     def _query_edges(self, symbol: str, edge_kind: str, *,
                      direction: str = "out") -> tuple[GrepHit, ...]:

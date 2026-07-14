@@ -344,6 +344,53 @@ final class OverlayState: ObservableObject {
     /// Active whisper.cpp subprocess — nil when not recording.
     var sttProcess: Process?
 
+    // MARK: - Face-state system (Compy personality mascot)
+
+    /// Minimum time a face must remain visible before transitioning (anti-flicker).
+    private static let faceMinimumDisplay: TimeInterval = 0.6
+
+    /// When the current face was first shown — used to enforce minimum display floor.
+    private var faceShownAt: Date = Date.distantPast
+
+    /// The currently displayed face — only changes after the minimum display floor expires.
+    @Published var displayedFace: String = ">-<"
+
+    /// The intended face for the current pipeline phase (without flicker protection).
+    var intendedFace: String {
+        switch phase {
+        case .empty: return ">-<"
+        case .processing: return selectionText.isEmpty ? ">•_•<" : ">.>"
+        case .results: return ">o<"
+        case .noMatch: return ">!?<"
+        case .degraded: return ">x_<"
+        }
+    }
+
+    /// Call on every state change — transitions to the intended face after the minimum
+    /// display floor expires, preventing jarring single-frame flicker on fast queries.
+    func maybeTransitionFace() {
+        let target = intendedFace
+        guard target != displayedFace else { return }
+        let elapsed = Date().timeIntervalSince(faceShownAt)
+        if elapsed >= Self.faceMinimumDisplay {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                displayedFace = target
+            }
+            faceShownAt = Date()
+        } else {
+            let remaining = Self.faceMinimumDisplay - elapsed
+            DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
+                guard let self = self else { return }
+                let targetNow = self.intendedFace
+                guard targetNow != self.displayedFace else { return }
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    self.displayedFace = targetNow
+                }
+                self.faceShownAt = Date()
+            }
+        }
+    }
+
     /// Dominant source across all hits (e.g. "freebuff", "heuristic", "grep").
     var sourceLabel: String {
         guard let first = results.first else { return "" }
@@ -368,6 +415,8 @@ final class OverlayState: ObservableObject {
         sttError = nil
         sttPhase = ""
         resultHeaderText = ""
+        displayedFace = ">-<"
+        faceShownAt = Date.distantPast
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
     }
@@ -397,15 +446,21 @@ struct OverlayView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            inputBar
-            if shouldShowContent {
-                Divider()
-                contentArea
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                inputBar
+                if shouldShowContent {
+                    Divider()
+                    contentArea
+                }
             }
+            .frame(width: 600)
+            .frame(minHeight: 72)
+
+            // Compy face — top-right, mirrors the macOS close button top-left.
+            // Always visible regardless of compact/expanded state.
+            compyFace
         }
-        .frame(width: 600)
-        .frame(minHeight: 72)
         .background(Color(NSColor.windowBackgroundColor))
         .onChange(of: state.phase) { _, newPhase in
             guard let window = NSApp.windows.first(where: { $0 is CompyPanel }) else { return }
@@ -416,6 +471,7 @@ struct OverlayView: View {
                 frame.size.height = targetHeight
                 window.setFrame(frame, display: true, animate: true)
             }
+            state.maybeTransitionFace()
         }
         .onTapGesture {
             guard state.phase != .results, state.phase != .degraded else { return }
@@ -439,6 +495,19 @@ struct OverlayView: View {
                 escMonitor = nil
             }
         }
+    }
+
+    // MARK: - Input Bar
+
+    /// ASCII face-state mascot — lives top-right, mirrors the macOS close button.
+    /// Changes with pipeline phase (idle → thinking → found → confused → error).
+    /// Subtle, monospaced, non-intrusive. The face IS the status indicator.
+    private var compyFace: some View {
+        Text(state.displayedFace)
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundColor(Color(NSColor.tertiaryLabelColor))
+            .padding(.top, 6)
+            .padding(.trailing, 10)
     }
 
     // MARK: - Input Bar

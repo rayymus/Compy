@@ -15,11 +15,26 @@ from .models import ParsedQuery, Selection
 
 # Question-phrase -> intent. Evaluated in order; first match wins.
 _INTENT_RULES: tuple[tuple[str, str], ...] = (
+    # Trace input: stack traces, error dumps with file:line frames.
+    # Note: _classify_intent lowercases first, so patterns use lowercase.
+    # Non-anchored — trace lines may appear mid-string after a header.
+    (r"file\s+\"[^\"]+\"\s*[,:]\s*(?:line\s+)?\d+", "trace"),
+    (r"\bat\s+\S+[(:]\d+", "trace"),
+    (r"traceback\s*\(", "trace"),
+    # History / rationale: why something exists, who changed it.
     (r"\bwhy was\b|\bwho (added|changed|wrote)\b|\bwhat commit\b|\bgit blame\b|\bgit log\b|\bcommit (message|history)\b", "history"),
+    (r"\bwhy (does|is)\b.*\b(exist|here|this|that)\b|\breason for\b|\bexplain this\b|\bwhy would\b", "rationale"),
+    # Relational: call graph, imports, inheritance.
     (r"\bcalls?\b|\bcallers? of\b|\bwhat (calls|invokes?)\b|\bwho calls\b", "relational"),
     (r"\bimport(s|ed)?\b|\binherits?\b|\bsubclass(es)? of\b", "relational"),
+    # Blast radius: impact analysis, dependency checking.
+    (r"\bwhat (breaks|depends|relies)\b|\bblast radius\b|\bimpact of\b|\bwhat would break\b", "blast_radius"),
+    # References / definition.
     (r"\bwhere else\b|\balso uses?\b|\bother (places|uses?)\b", "references"),
     (r"\bwhere\b.*\bdefined\b|\bdefinition of\b|\bfind def\b|\bthe def of\b", "definition"),
+    # Convention / precedent: how do we normally do X.
+    (r"\bhow (do|should) (we|i|you)\b|\bwhat('s| is) the pattern\b|\bshow (me |)(examples?|usages?)\b|\bconvention for\b|\bhow (is|are)\b.*\b(typically|usually|normally)\b", "convention"),
+    # Fuzzy: catch-all for natural-language search.
     (r"\bwhere is\b|\bfind\b|\bwhat (does|is|handles?)\b", "fuzzy"),
 )
 
@@ -34,6 +49,33 @@ _STOPWORDS: frozenset[str] = frozenset({
 })
 
 _SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+
+# Stack trace frame detection — zero-LLM routing for pasted errors.
+_TRACE_FRAME_RE = re.compile(
+    r'^\s*(?:File\s+"([^"]+)"|at\s+(\S+))[,:]?\s*(?:line\s+)?(\d+)',
+    re.IGNORECASE | re.MULTILINE,
+)
+_TRACE_HEADER_RE = re.compile(r'^\s*Traceback\s*\(', re.IGNORECASE)
+
+
+def _is_trace_input(text: str) -> bool:
+    """Detect stack-trace-shaped input for zero-LLM routing."""
+    return bool(_TRACE_HEADER_RE.search(text)) or bool(_TRACE_FRAME_RE.search(text))
+
+
+def _extract_trace_frames(text: str) -> tuple[tuple[str, int], ...]:
+    """Extract (file, line) pairs from a stack trace."""
+    frames: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for m in _TRACE_FRAME_RE.finditer(text):
+        file = m.group(1) or m.group(2) or ""
+        line_str = m.group(3)
+        if file and line_str:
+            key = (file, int(line_str))
+            if key not in seen:
+                frames.append(key)
+                seen.add(key)
+    return tuple(frames)
 
 
 def _classify_intent(question: str, has_selection: bool) -> tuple[str, float]:
