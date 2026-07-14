@@ -106,8 +106,17 @@ def _extract_symbol(text: str) -> str | None:
 
 def _extract_keywords(question: str) -> tuple[str, ...]:
     q = question.lower()
-    raw = (t for t in re.findall(r"[a-z][a-z0-9_]+", q) if len(t) > 2 and t not in _STOPWORDS)
-    return tuple(dict.fromkeys(raw))[:8]  # de-dupe, keep order, cap at 8
+    # Extract multi-word phrases (2-3 consecutive words) for AND search.
+    words = [w for w in q.split() if len(w) > 2 and w not in _STOPWORDS]
+    phrases: list[str] = []
+    for i in range(len(words) - 1):
+        phrases.append(f"{words[i]} {words[i+1]}")
+    if len(words) >= 3:
+        for i in range(len(words) - 2):
+            phrases.append(f"{words[i]} {words[i+1]} {words[i+2]}")
+    # Combine single words + phrases, dedupe, cap at 8.
+    raw = phrases + [t for t in words if len(t) > 2]
+    return tuple(dict.fromkeys(raw))[:8]
 
 
 class RuleBasedParser:

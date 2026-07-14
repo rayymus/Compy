@@ -347,13 +347,25 @@ final class OverlayState: ObservableObject {
     // MARK: - Face-state system (Compy personality mascot)
 
     /// Minimum time a face must remain visible before transitioning (anti-flicker).
-    private static let faceMinimumDisplay: TimeInterval = 0.6
+    private static let faceMinimumDisplay: TimeInterval = 0.55
 
     /// When the current face was first shown — used to enforce minimum display floor.
     private var faceShownAt: Date = Date.distantPast
 
-    /// The currently displayed face — only changes after the minimum display floor expires.
+    /// The currently displayed face — crossfades with spring bounce on change.
     @Published var displayedFace: String = ">-<"
+
+    /// Spring-bounce scale: 1.0 = normal, pops to 1.25 on transition then settles.
+    @Published var faceScale: CGFloat = 1.0
+
+    /// Opacity for crossfade transitions.
+    @Published var faceOpacity: Double = 1.0
+
+    /// Gentle vertical float offset for idle animation.
+    @Published var faceFloatOffset: CGFloat = 0
+
+    /// Shadow radius that pulses with state.
+    @Published var faceGlowRadius: CGFloat = 0
 
     /// The intended face for the current pipeline phase (without flicker protection).
     var intendedFace: String {
@@ -366,28 +378,92 @@ final class OverlayState: ObservableObject {
         }
     }
 
-    /// Call on every state change — transitions to the intended face after the minimum
-    /// display floor expires, preventing jarring single-frame flicker on fast queries.
+    /// Color for the current face — meaningful per state.
+    var faceColor: Color {
+        switch phase {
+        case .empty: return Color(NSColor.tertiaryLabelColor)
+        case .processing: return .blue
+        case .results: return .green
+        case .noMatch: return .orange
+        case .degraded: return .red
+        }
+    }
+
+    /// Glow color — matches face but more saturated.
+    var faceGlowColor: Color {
+        faceColor.opacity(0.3)
+    }
+
+    /// Stop the processing pulse (called when results arrive).
+    func stopProcessingPulse() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            faceScale = 1.0
+        }
+    }
+
+    /// Call on every state change — crossfade + spring bounce to new face.
     func maybeTransitionFace() {
+        guard !faceTransitioning else { return }
         let target = intendedFace
         guard target != displayedFace else { return }
+        faceTransitioning = true
         let elapsed = Date().timeIntervalSince(faceShownAt)
-        if elapsed >= Self.faceMinimumDisplay {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                displayedFace = target
+        let delay = max(0, Self.faceMinimumDisplay - elapsed)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            let targetNow = self.intendedFace
+            guard targetNow != self.displayedFace else { return }
+
+            // Crossfade: fade out → change face → spring bounce in
+            withAnimation(.easeOut(duration: 0.12)) {
+                self.faceOpacity = 0
+                self.faceScale = 0.7
             }
-            faceShownAt = Date()
-        } else {
-            let remaining = Self.faceMinimumDisplay - elapsed
-            DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
-                guard let self = self else { return }
-                let targetNow = self.intendedFace
-                guard targetNow != self.displayedFace else { return }
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    self.displayedFace = targetNow
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                self.displayedFace = targetNow
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) {
+                    self.faceOpacity = 1
+                    self.faceScale = 1.25  // overshoot
+                    self.faceGlowRadius = 8
+                }
+                // Settle back to normal
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.6).delay(0.15)) {
+                    self.faceScale = 1.0
+                }
+                withAnimation(.easeOut(duration: 0.8).delay(0.3)) {
+                    self.faceGlowRadius = 0
                 }
                 self.faceShownAt = Date()
+                // Release the transition guard after settle.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.faceTransitioning = false
+                }
             }
+        }
+    }
+
+    /// Start continuous idle float animation when overlay opens.
+    func startIdleFloat() {
+        withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
+            faceFloatOffset = -2
+        }
+    }
+
+    /// Stop idle float (e.g. when query submitted).
+    func stopIdleFloat() {
+        withAnimation(.easeOut(duration: 0.3)) {
+            faceFloatOffset = 0
+        }
+    }
+
+    /// Guard against double-bounce from rapid successive transitions.
+    private var faceTransitioning = false
+
+    /// Continuous gentle pulse while processing.
+    func startProcessingPulse() {
+        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+            faceScale = 1.06
         }
     }
 
@@ -416,7 +492,12 @@ final class OverlayState: ObservableObject {
         sttPhase = ""
         resultHeaderText = ""
         displayedFace = ">-<"
+        faceScale = 1.0
+        faceOpacity = 1.0
+        faceFloatOffset = 0
+        faceGlowRadius = 0
         faceShownAt = Date.distantPast
+        faceTransitioning = false
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
     }
@@ -501,11 +582,15 @@ struct OverlayView: View {
 
     /// ASCII face-state mascot — lives top-right, mirrors the macOS close button.
     /// Changes with pipeline phase (idle → thinking → found → confused → error).
-    /// Subtle, monospaced, non-intrusive. The face IS the status indicator.
+    /// Color-coded, spring-bouncing, gently animated. The face IS the status indicator.
     private var compyFace: some View {
         Text(state.displayedFace)
-            .font(.system(size: 13, design: .monospaced))
-            .foregroundColor(Color(NSColor.tertiaryLabelColor))
+            .font(.system(size: 18, weight: .medium, design: .monospaced))
+            .foregroundColor(state.faceColor)
+            .scaleEffect(state.faceScale)
+            .opacity(state.faceOpacity)
+            .offset(y: state.faceFloatOffset)
+            .shadow(color: state.faceGlowColor, radius: state.faceGlowRadius, x: 0, y: 0)
             .padding(.top, 6)
             .padding(.trailing, 10)
     }
@@ -779,10 +864,16 @@ struct OverlayView: View {
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "keyboard")
-                .font(.system(size: 34, weight: .light))
-                .foregroundColor(Color(NSColor.tertiaryLabelColor))
+        VStack(spacing: 14) {
+            // Compy face center-stage — large, the focal point of the overlay.
+            Text(state.displayedFace)
+                .font(.system(size: 48, weight: .light, design: .monospaced))
+                .foregroundColor(state.faceColor)
+                .scaleEffect(state.faceScale)
+                .offset(y: state.faceFloatOffset)
+                .shadow(color: state.faceGlowColor, radius: state.faceGlowRadius, x: 0, y: 2)
+                .onAppear { state.startIdleFloat() }
+                .onDisappear { state.stopIdleFloat() }
 
             HStack(spacing: 6) {
                 Text("Press").foregroundColor(.secondary)
@@ -972,6 +1063,8 @@ struct OverlayView: View {
         let question = state.text
 
         hapticSubmit()
+        state.stopIdleFloat()
+        state.startProcessingPulse()
 
         withAnimation(.easeOut(duration: 0.15)) {
             state.phase = .processing
@@ -1071,6 +1164,7 @@ struct OverlayView: View {
 
                 if let result = try? compyDecoder.decode(QueryResult.self, from: outData) {
                     DispatchQueue.main.async {
+                        state.stopProcessingPulse()
                         let n = result.hits.count
                         // 20% chance of personality-flavored result header
                         if n > 0 && CompyMessagePool.shouldUsePersonality() {

@@ -38,6 +38,7 @@ class RipgrepGrepper:
                 [
                     self._rg, "--json", "--no-heading", "--line-number",
                     "--max-count", str(self._cap),
+                    "--context", "1",  # 1 line of context before/after each match
                     "-e", pattern, workspace_root,
                 ],
                 capture_output=True,
@@ -60,25 +61,45 @@ class RipgrepGrepper:
 
     def _parse(self, stdout: str) -> tuple[GrepHit, ...]:
         hits: list[GrepHit] = []
+        # Collect context lines keyed by (file, line) so we can prepend/append
+        # them to match snippets.
+        context_before: dict[tuple[str, int], str] = {}  # (file, match_line) -> context text
+        context_after: dict[tuple[str, int], str] = {}
+        pending_context: str | None = None  # last context line seen
+
         for line in stdout.splitlines():
             try:
                 obj: dict[str, Any] = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("type") != "match":
+            obj_type = obj.get("type")
+            if obj_type == "context":
+                ctx_data = obj["data"]
+                ctx_path = ctx_data["path"]["text"]
+                ctx_ln = ctx_data["line_number"]
+                ctx_text = (ctx_data.get("lines") or {}).get("text", "").rstrip("\n")
+                pending_context = (ctx_path, ctx_ln, ctx_text)
+                continue
+            if obj_type != "match":
+                pending_context = None
                 continue
             data = obj["data"]
             path = data["path"]["text"]
             ln = data["line_number"]
             subs = data.get("submatches") or []
-            # rg --json's submatch shape (verified): `{"match":{"text":...},"start":<int offset>,"end":<int offset>}`.
-            # `start` is a byte offset within the line, not a dict with `col`/`line`.
             col = subs[0]["start"] if subs else 0
             snippet = (data.get("lines") or {}).get("text", "").rstrip("\n")
             # Skip comment-only lines — they're noise, not code.
             if _COMMENT_ONLY_RE.match(snippet):
+                pending_context = None
                 continue
-            hits.append(GrepHit(file=path, line=ln, column=col, snippet=snippet[:300]))
+            # Prepend context line if available (appears just before this match).
+            if pending_context is not None:
+                ctx_path2, ctx_ln2, ctx_text2 = pending_context
+                if ctx_path2 == path and ctx_ln2 == ln - 1:
+                    snippet = ctx_text2[:150] + "\n" + snippet
+            hits.append(GrepHit(file=path, line=ln, column=col, snippet=snippet[:400]))
+            pending_context = None
         return tuple(hits)
 
 

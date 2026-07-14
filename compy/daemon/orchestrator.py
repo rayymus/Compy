@@ -179,16 +179,31 @@ def _evaluate(
                 selection_file=sel_file, selection_text=sel_text,
             )
 
-    # Fuzzy path: try each parsed keyword as a grep query.
+    # Fuzzy path: try multi-keyword AND search, then individual keywords.
     if parsed.intent == "fuzzy":
         candidates: tuple[GrepHit, ...] = ()
-        for kw in list(parsed.keywords)[:MAX_FUZZY_KEYWORD_TRIES]:
+        keywords = list(parsed.keywords)[:MAX_FUZZY_KEYWORD_TRIES]
+        # Strategy 1: Multi-keyword OR search (match any keyword, broader recall).
+        if len(keywords) >= 2:
+            and_pattern = "|".join(keywords[:4])
             try:
-                candidates = grepper.grep(kw, workspace)
-            except ReasonerUnavailable as exc:
-                return parsed, (), True, f"grep failed: {exc}"
-            if candidates:
-                break
+                candidates = grepper.grep(and_pattern, workspace)
+                # Boost hits from selection file to top.
+                if sel_file:
+                    candidates = _boost_selection_file(candidates, sel_file)
+            except ReasonerUnavailable:
+                pass
+        # Strategy 2: Fall back to individual keyword search.
+        if not candidates:
+            for kw in keywords:
+                try:
+                    candidates = grepper.grep(kw, workspace)
+                except ReasonerUnavailable as exc:
+                    return parsed, (), True, f"grep failed: {exc}"
+                if candidates:
+                    if sel_file:
+                        candidates = _boost_selection_file(candidates, sel_file)
+                    break
         if not candidates:
             return parsed, (), False, "no hits"
 
@@ -254,6 +269,17 @@ def _selection_text(sel: Selection | None) -> str | None:
 
 def _first_keyword(keywords: tuple[str, ...]) -> str | None:
     return keywords[0] if keywords else None
+
+
+def _boost_selection_file(
+    hits: tuple[GrepHit, ...], selection_file: str
+) -> tuple[GrepHit, ...]:
+    """Promote hits from the user's current file to the top of results."""
+    if not selection_file:
+        return hits
+    in_file = [h for h in hits if h.file == selection_file or h.file.endswith(selection_file)]
+    other = [h for h in hits if h not in in_file]
+    return tuple(in_file + other)
 
 
 def _read_line(file: str, line: int, workspace: str) -> str:
