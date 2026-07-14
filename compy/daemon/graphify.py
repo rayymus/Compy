@@ -369,6 +369,29 @@ class GraphQuerier:
                 merged.append(hit)
         return tuple(merged)
 
+    def query_dead_code(self) -> tuple[GrepHit, ...]:
+        """Find functions/classes with zero callers (likely dead code)."""
+        if self._graph is None:
+            return ()
+        hits: list[GrepHit] = []
+        for node_id in self._graph.nodes:
+            node_data = self._graph.nodes[node_id]
+            if node_data.get("kind") not in ("function", "class"):
+                continue
+            # Skip dunder methods — they're called implicitly by Python.
+            short_name = node_id.rsplit("::", 1)[-1]
+            if short_name.startswith("__") and short_name.endswith("__"):
+                continue
+            # A symbol is dead if it has no incoming call/inherit edges.
+            in_edges = self._graph.in_edges(node_id, data=True)
+            has_callers = any(d.get("kind") in ("calls", "inherits") for _, _, d in in_edges)
+            if not has_callers:
+                file = node_data.get("file", node_id.split("::")[0])
+                line = node_data.get("line", 0)
+                snippet = node_data.get("snippet", node_id)[:300]
+                hits.append(GrepHit(file=file, line=line, column=0, snippet=snippet))
+        return tuple(hits)
+
     def _query_edges(self, symbol: str, edge_kind: str, *,
                      direction: str = "out") -> tuple[GrepHit, ...]:
         if self._graph is None or self._workspace is None:

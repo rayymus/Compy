@@ -36,6 +36,10 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"\bhow (do|should) (we|i|you)\b|\bwhat('s| is) the pattern\b|\bshow (me |)(examples?|usages?)\b|\bconvention for\b|\bhow (is|are)\b.*\b(typically|usually|normally)\b", "convention"),
     # Dedup check: does this already exist? (same mechanism as convention, different trigger).
     (r"\bdoes this (already )?exist\b|\bis there (already )\b|\bduplicate of\b|\banyone (already )?(done|wrote|built)\b|\bhas this (been |)(done|written|built)\b|\bis (this|that|it) (a |)(duplicate|similar)\b", "dedup"),
+    # Dead code: unused symbols, zero references.
+    (r"\bwhat('s| is) unused\b|\bdead code\b|\bwhat isn('t|ot) (being |)used\b|\bfind unused\b|\bunreferenced\b", "dead_code"),
+    # Overview / catch-up Q&A: broad repo questions about architecture, flow, structure.
+    (r"\bhow does\b|\bgive me an overview\b|\bexplain the (codebase|repo|architecture|structure)\b|\bhow (is|are)\b.*\b(organized|structured|laid out)\b|\bwhat (is|are) the (main|key) (modules?|components?|parts?)\b", "overview"),
     # Fuzzy: catch-all for natural-language search.
     (r"\bwhere is\b|\bfind\b|\bwhat (does|is|handles?)\b", "fuzzy"),
 )
@@ -128,7 +132,7 @@ class RuleBasedParser:
         has_sel = bool(selection_text)
         intent, confidence = _classify_intent(question, has_sel)
         symbol = _extract_symbol(selection_text) if has_sel else None
-        keywords = _extract_keywords(question) if intent == "fuzzy" else ()
+        keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview") else ()
         if has_sel and symbol:
             confidence = min(1.0, confidence + _SELECTION_SYMBOL_BONUS)
         # Symbol is extracted whenever the selection provides one. The orchestrator decides

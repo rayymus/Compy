@@ -156,9 +156,27 @@ def _evaluate(
     if parsed.confidence < FUZZY_THRESHOLD:
         parsed = replace(parsed, intent="fuzzy")
 
-    # Convention / dedup path: "how do we normally do X" or "does this exist already"
-    # Both route to fuzzy semantic search (same capability, different trigger).
-    if parsed.intent in ("convention", "dedup"):
+    # Convention / dedup / overview path: route to fuzzy semantic search.
+    if parsed.intent in ("convention", "dedup", "overview"):
+        parsed = replace(parsed, intent="fuzzy")
+
+    # --- Dead-code path: find unused symbols via Graphify ---
+    if parsed.intent == "dead_code" and grapher is not None:
+        try:
+            grapher.load(workspace)
+        except ReasonerUnavailable:
+            parsed = replace(parsed, intent="fuzzy")
+        else:
+            candidates = grapher.query_dead_code()
+            if candidates:
+                return _rank_or_degrade(
+                    parsed=parsed, reasoners=reasoners,
+                    question=question, candidates=candidates,
+                    selection_file=sel_file, selection_text=sel_text,
+                )
+        parsed = replace(parsed, intent="fuzzy")
+    # If grapher is None, fall through to fuzzy.
+    if parsed.intent == "dead_code":
         parsed = replace(parsed, intent="fuzzy")
 
     # Structured path: parse a symbol, search it.
