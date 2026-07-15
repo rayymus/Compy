@@ -25,11 +25,29 @@ interface SelectionEnvelope {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const disposable = vscode.commands.registerCommand(
+  // Register the hotkey command (explicit trigger).
+  const hotkeyDisposable = vscode.commands.registerCommand(
     "compy.companion.hotkey",
     sendSelectionEnvelope,
   );
-  context.subscriptions.push(disposable);
+  context.subscriptions.push(hotkeyDisposable);
+
+  // Proactive updates: keep the envelope fresh so the overlay always has
+  // the correct workspaceRoot, even when the hotkey fires without editor focus.
+  // Write immediately on activation.
+  sendSelectionEnvelope();
+
+  // Re-write when the active editor changes (file switch).
+  const editorDisposable = vscode.window.onDidChangeActiveTextEditor(
+    () => sendSelectionEnvelope(),
+  );
+  context.subscriptions.push(editorDisposable);
+
+  // Re-write when workspace folders change (project switch).
+  const wsDisposable = vscode.workspace.onDidChangeWorkspaceFolders(
+    () => sendSelectionEnvelope(),
+  );
+  context.subscriptions.push(wsDisposable);
 }
 
 function sendSelectionEnvelope(): void {
@@ -42,7 +60,7 @@ function sendSelectionEnvelope(): void {
     line: editor?.selection.start.line ?? 0,
     workspaceRoot: wsFolder,
     selectedText: editor?.document.getText(editor?.selection) ?? "",
-    ts: Date.now(),
+    ts: Math.floor(Date.now() / 1000),  // seconds — matches Swift Date().timeIntervalSince1970
   };
 
   const payload = JSON.stringify(envelope);
@@ -62,6 +80,7 @@ function sendSelectionEnvelope(): void {
   });
   client.on("error", () => {
     // No listener — that's fine, the file write already worked.
+    client.destroy();  // clean up so proactive updates don't leak sockets
   });
 }
 

@@ -204,3 +204,43 @@ def test_dedup_duplicate_of():
 def test_dedup_anyone_wrote():
     parsed = _parse("anyone already wrote a rate limiter")
     assert parsed.intent == "dedup"
+
+
+# ---------- CamelCase keyword splitting --------------------------------------
+
+def test_camelcase_split_into_keywords():
+    """CamelCase words should split into constituent parts for fuzzy search.
+
+    Without splitting, "handleRequest" lowercases to "handlerequest" — a
+    single token that never matches anything in a real codebase. Splitting
+    gives ripgrep "handle" and "request" as separate greppable keywords.
+    """
+    parsed = _parse("where is handleRequest")
+    assert "handle" in parsed.keywords
+    assert "request" in parsed.keywords
+    assert "handlerequest" not in parsed.keywords
+
+
+def test_pascalcase_split_into_keywords():
+    """PascalCase (leading uppercase) should also split."""
+    parsed = _parse("where is HTTPServer")
+    assert "http" in parsed.keywords
+    assert "server" in parsed.keywords
+
+
+def test_camelcase_preserves_multi_word_phrases():
+    """After splitting, multi-word phrases are still built from the split parts.
+
+    Uses "what does ... actually do" (fuzzy intent) — "where is ... defined"
+    would match the definition intent, which skips keyword extraction.
+    """
+    parsed = _parse("what does handleRequest actually do")
+    # "handle request" should appear as a phrase
+    assert any("handle" in kw and "request" in kw for kw in parsed.keywords)
+
+
+def test_camelcase_mixed_acronyms():
+    """Mixed case with acronyms: MyAPIKey → my, api, key."""
+    parsed = _parse("where is MyAPIKey")
+    assert "api" in parsed.keywords
+    assert "key" in parsed.keywords

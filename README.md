@@ -12,8 +12,15 @@ Compy is a Spotlight-like popup that answers codebase questions without leaving 
 - **"What calls `handle_request`?"** — traces callers through the call graph
 - **"Where's the function that validates tokens?"** — fuzzy semantic search
 - **"Who added this null check?"** — git blame and commit history
+- **"What breaks if I change this?"** — blast radius via call graph
+- **"Paste a stack trace"** — jumps straight to each frame's source
 
 Every result is clickable — jumps directly to `file:line` in your editor.
+
+Compy has a personality: an ASCII face-state mascot that blinks, winks, and
+darts its eyes while searching, then morphs smoothly between expressions as the
+pipeline progresses (idle → thinking → found → confused). Not a chatbot — a
+status indicator wearing a mascot costume.
 
 ---
 
@@ -64,9 +71,9 @@ Then load `compy/extension/` as an unpacked extension in VS Code / Antigravity I
 After making changes, verify everything works:
 
 ```sh
-# 1. Run the daemon test suite (81 tests)
+# 1. Run the daemon test suite (102 tests)
 ./compy.sh test
-# Expected: 81 passed, 1 skipped, 0 failed
+# Expected: 102 passed, 1 skipped, 0 failed
 
 # 2. Build the Swift overlay (catches compile errors)
 ./compy.sh overlay
@@ -128,7 +135,7 @@ Your question (voice or text)
 | Command | What it does |
 |---------|-------------|
 | `./compy.sh overlay` | Build and launch the Swift/SwiftUI overlay |
-| `./compy.sh build` | Run all 81 tests + compile extension + build overlay |
+| `./compy.sh build` | Run all 102 tests + compile extension + build overlay |
 | `./compy.sh test` | Run daemon tests only |
 | `./compy.sh listen` | Start UNIX socket listener (for extension selection) |
 | `./compy.sh query` | Pipe a JSON query into the daemon |
@@ -143,14 +150,18 @@ Your question (voice or text)
 
 - **Global hotkey** (Cmd+Shift+Space) — overlay opens top-right, gets keyboard focus
 - **Voice + text input** — push-to-talk STT via whisper.cpp (offline, zero permissions)
-- **7 intent types** — history, relational, references, definition, fuzzy, empty
+- **7 intent types** — history, relational, references, definition, fuzzy, trace, rationale
 - **6 backends** — Freebuff, Ollama, heuristic, stub, Graphify, Git history
 - **Personality system** — greeting variation, staggered result reveals, haptic feedback,
   playful result headers, no-match hint pool, mic pulse rings
-- **Compact/expand** — 72px input bar → 420px on results with spring animation
+- **Face-state mascot** — 7 ASCII faces mapped to pipeline phases, smooth morph transitions,
+  periodic blinking (every 3-5s, 15% wink chance), eye darting during processing
+- **Compact/expand** — 72px input bar → 420px on results with smooth animation
 - **Jump-to-editor** — click any result to open at file:line in agy-ide/cursor/code
 - **Comment filtering** — grep results skip comment-only lines
+- **CamelCase keyword splitting** — "handleRequest" splits to "handle" + "request" for better fuzzy search
 - **Typing animation** — randomized quips during processing (16 messages across 3 pools)
+- **Stale envelope rejection** — extension workspaceRoot validated by timestamp, falls back to git root
 
 ---
 

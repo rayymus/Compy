@@ -56,6 +56,14 @@ _STOPWORDS: frozenset[str] = frozenset({
 
 _SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 
+# Split CamelCase / PascalCase identifiers into constituent words.
+#   "handleRequest" → ["handle", "Request"]
+#   "HTTPServer"     → ["HTTP", "Server"]
+#   "MyAPIKey"       → ["My", "API", "Key"]
+# Run BEFORE lowercasing — after .lower() the boundary is destroyed and
+# "handlerequest" is a single token that never matches in grep.
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
 # Stack trace frame detection — zero-LLM routing for pasted errors.
 _TRACE_FRAME_RE = re.compile(
     r'^\s*(?:File\s+"([^"]+)"|at\s+(\S+))[,:]?\s*(?:line\s+)?(\d+)',
@@ -110,10 +118,26 @@ def _extract_symbol(text: str) -> str | None:
     return max(tokens, key=len)
 
 
+def _split_camel_case(word: str) -> list[str]:
+    """Split a CamelCase/PascalCase word into its constituent parts."""
+    parts = _CAMEL_SPLIT_RE.split(word)
+    return [p for p in parts if len(p) > 1]
+
+
 def _extract_keywords(question: str) -> tuple[str, ...]:
-    q = question.lower()
-    # Extract multi-word phrases (2-3 consecutive words) for AND search.
-    words = [w for w in q.split() if len(w) > 2 and w not in _STOPWORDS]
+    # Split CamelCase BEFORE lowercasing so "handleRequest" becomes
+    # "handle" + "request" — two greppable keywords instead of the single
+    # useless token "handlerequest" that never matches anything in the repo.
+    words: list[str] = []
+    for raw_word in question.split():
+        if len(raw_word) <= 2:
+            continue
+        camel_parts = _split_camel_case(raw_word)
+        if len(camel_parts) > 1:
+            words.extend(p.lower() for p in camel_parts)
+        else:
+            words.append(raw_word.lower())
+    words = [w for w in words if len(w) > 2 and w not in _STOPWORDS]
     phrases: list[str] = []
     for i in range(len(words) - 1):
         phrases.append(f"{words[i]} {words[i+1]}")

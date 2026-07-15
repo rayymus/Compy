@@ -354,20 +354,65 @@ final class OverlayState: ObservableObject {
     /// When the current face was first shown — used to enforce minimum display floor.
     private var faceShownAt: Date = Date.distantPast
 
-    /// The currently displayed face — crossfades with spring bounce on change.
-    @Published var displayedFace: String = ">-<"
+    /// The base face expression — set by maybeTransitionFace during morphs.
+    /// blink/wink/dart are applied on top via the computed displayedFace.
+    @Published var baseFace: String = ">-<"
 
-    /// Spring-bounce scale: 1.0 = normal, pops to 1.25 on transition then settles.
+    /// True while eyes are closed during a blink (~80ms).
+    @Published var isBlinking = false
+
+    /// True during a one-sided wink (same 80ms as blink).
+    @Published var isWinking = false
+    /// false = left wink `;-<`, true = right wink `>-;`.
+    @Published var winkRightSide = false
+
+    /// Non-nil while eyes are darting — a complete face override.
+    @Published var eyeDart: String? = nil
+
+    /// The face the user sees — blink/wink/dart layered on top of baseFace.
+    var displayedFace: String {
+        if isBlinking { return blinkVariant() }
+        if isWinking { return winkRightSide ? ">-;" : ";-<" }
+        if let dart = eyeDart { return dart }
+        return baseFace
+    }
+
+    /// Timer for periodic blinking.
+    private var blinkTimer: Timer?
+    /// Timer for eye darting during processing.
+    private var dartTimer: Timer?
+
+    /// Returns the eyes-closed variant of baseFace for blinks.
+    func blinkVariant() -> String {
+        switch baseFace {
+        case ">-<": return "-_-"
+        case ">.<": return "-.-"
+        case ">•_•<": return "-•_•-"
+        case ">.>": return "-.-"
+        case ">o<": return "-o-"
+        case ">!?<": return "-!?-"
+        case ">x_<": return "-x_-"
+        default: return baseFace
+        }
+    }
+
+    /// Eye-dart faces for the processing state — cycles through looking directions.
+    func dartFaces() -> [String] {
+        switch baseFace {
+        case ">.>": return ["<.<", "O.O", ">_>", "<_<"]
+        case ">•_•<": return [">.>", "<.<", "O.O"]
+        default: return []
+        }
+    }
+
+    /// Scale: 1.0 = normal, dips to 0.92 during morph dissolve then eases back.
     @Published var faceScale: CGFloat = 1.0
 
-    /// Opacity for crossfade transitions.
+    /// Opacity for crossfade transitions (and processing breathing).
     @Published var faceOpacity: Double = 1.0
 
     /// Gentle vertical float offset for idle animation.
     @Published var faceFloatOffset: CGFloat = 0
-
-    /// Shadow radius that pulses with state.
-    @Published var faceGlowRadius: CGFloat = 0
 
     /// The intended face for the current pipeline phase (without flicker protection).
     var intendedFace: String {
@@ -391,23 +436,24 @@ final class OverlayState: ObservableObject {
         }
     }
 
-    /// Glow color — matches face but more saturated.
-    var faceGlowColor: Color {
-        faceColor.opacity(0.3)
-    }
-
     /// Stop the processing pulse (called when results arrive).
+    /// Resets faceTransitioning so the pending morph to results/noMatch face can proceed.
     func stopProcessingPulse() {
-        withAnimation(.easeOut(duration: 0.2)) {
+        faceTransitioning = false
+        stopDartTimer()
+        eyeDart = nil
+        withAnimation(.easeOut(duration: 0.25)) {
+            faceOpacity = 1.0
             faceScale = 1.0
         }
     }
 
-    /// Call on every state change — crossfade + spring bounce to new face.
+    /// Call on every state change — smooth morph dissolve to new face.
+    /// The face blinks during the swap so the new expression appears with "open eyes."
     func maybeTransitionFace() {
         guard !faceTransitioning else { return }
         let target = intendedFace
-        guard target != displayedFace else { return }
+        guard target != baseFace else { return }
         faceTransitioning = true
         let elapsed = Date().timeIntervalSince(faceShownAt)
         let delay = max(0, Self.faceMinimumDisplay - elapsed)
@@ -415,30 +461,26 @@ final class OverlayState: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
             let targetNow = self.intendedFace
-            guard targetNow != self.displayedFace else { return }
+            guard targetNow != self.baseFace else { return }
 
-            // Crossfade: fade out → change face → spring bounce in
-            withAnimation(.easeOut(duration: 0.12)) {
+            // Blink closed while the face swaps — eyes close during transition.
+            self.isBlinking = true
+
+            // Morph: dissolve out → swap face → ease back in.
+            withAnimation(.easeOut(duration: 0.15)) {
                 self.faceOpacity = 0
-                self.faceScale = 0.7
+                self.faceScale = 0.92
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                self.displayedFace = targetNow
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.baseFace = targetNow
+                // Open eyes now that the new face is revealed.
+                self.isBlinking = false
+                withAnimation(.easeOut(duration: 0.25)) {
                     self.faceOpacity = 1
-                    self.faceScale = 1.25  // overshoot
-                    self.faceGlowRadius = 8
-                }
-                // Settle back to normal
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.6).delay(0.15)) {
                     self.faceScale = 1.0
                 }
-                withAnimation(.easeOut(duration: 0.8).delay(0.3)) {
-                    self.faceGlowRadius = 0
-                }
                 self.faceShownAt = Date()
-                // Release the transition guard after settle.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
                     self?.faceTransitioning = false
                 }
             }
@@ -462,10 +504,94 @@ final class OverlayState: ObservableObject {
     /// Guard against double-bounce from rapid successive transitions.
     private var faceTransitioning = false
 
-    /// Continuous gentle pulse while processing.
+    // MARK: - Blink & Dart Timers
+
+    /// Start periodic blinking: every 3-5 seconds, eyes close for 80ms.
+    /// 15% chance to wink instead of full blink.
+    func startBlinkTimer() {
+        stopBlinkTimer()
+        scheduleNextBlink()
+    }
+
+    private func scheduleNextBlink() {
+        let interval = TimeInterval.random(in: 3...5)
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.fireBlink()
+        }
+    }
+
+    private func fireBlink() {
+        // Don't blink during a morph transition — let the morph handle it.
+        guard !faceTransitioning else { scheduleNextBlink(); return }
+        // 15% chance to wink instead of full blink.
+        if Double.random(in: 0...1) < 0.15 {
+            isWinking = true
+            winkRightSide = Bool.random()
+        } else {
+            isBlinking = true
+        }
+        // Eyes open after 80ms.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in
+            guard let self = self else { return }
+            self.isBlinking = false
+            self.isWinking = false
+        }
+        // Schedule the next blink.
+        scheduleNextBlink()
+    }
+
+    func stopBlinkTimer() {
+        blinkTimer?.invalidate()
+        blinkTimer = nil
+        isBlinking = false
+        isWinking = false
+    }
+
+    /// Start eye-darting: cycles through looking directions every 1.5-2.5s.
+    func startDartTimer() {
+        stopDartTimer()
+        let faces = dartFaces()
+        guard !faces.isEmpty else { return }
+        scheduleNextDart(index: -1)
+    }
+
+    private func scheduleNextDart(index: Int) {
+        let interval = TimeInterval.random(in: 1.5...2.5)
+        dartTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            let faces = self.dartFaces()
+            guard !faces.isEmpty else { self.eyeDart = nil; return }
+            let nextIdx = (index + 1) % (faces.count + 1)  // +1 for nil (base face)
+            if nextIdx == faces.count {
+                self.eyeDart = nil
+                self.scheduleNextDart(index: -1)
+            } else {
+                self.eyeDart = faces[nextIdx]
+                self.scheduleNextDart(index: nextIdx)
+            }
+        }
+    }
+
+    func stopDartTimer() {
+        dartTimer?.invalidate()
+        dartTimer = nil
+        eyeDart = nil
+    }
+
+    // MARK: - Pulse
+
+    /// Start the processing pulse — gentle opacity breathing + eye darts.
+    /// Delayed until after the face morph settles so the opacity animation
+    /// doesn't fight the morph's dissolve, and so baseFace is already the
+    /// processing expression when dartFaces() is called.
     func startProcessingPulse() {
-        withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-            faceScale = 1.06
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, self.phase == .processing else { return }
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                self.faceOpacity = 0.6
+            }
+            self.startDartTimer()
         }
     }
 
@@ -494,13 +620,18 @@ final class OverlayState: ObservableObject {
         sttError = nil
         sttPhase = ""
         resultHeaderText = ""
-        displayedFace = ">-<"
+        baseFace = ">-<"
+        isBlinking = false
+        isWinking = false
+        winkRightSide = false
+        eyeDart = nil
         faceScale = 1.0
         faceOpacity = 1.0
         faceFloatOffset = 0
-        faceGlowRadius = 0
         faceShownAt = Date.distantPast
         faceTransitioning = false
+        stopBlinkTimer()
+        stopDartTimer()
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
     }
@@ -530,7 +661,7 @@ struct OverlayView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
                 inputBar
                 if shouldShowContent {
@@ -541,7 +672,7 @@ struct OverlayView: View {
             .frame(width: 600)
             .frame(minHeight: 72)
 
-            // Compy face — top-right, mirrors the macOS close button top-left.
+            // Compy face — top-left, mirrors the macOS close button.
             // Always visible regardless of compact/expanded state.
             compyFace
         }
@@ -564,6 +695,7 @@ struct OverlayView: View {
             state.mode = .mic
         }
         .onAppear {
+            state.startBlinkTimer()
             escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.keyCode == UInt16(kVK_Escape) {
                     OverlayController.shared.hide()
@@ -574,6 +706,7 @@ struct OverlayView: View {
         }
         .onDisappear {
             state.stopRecording()
+            state.stopBlinkTimer()
             if let monitor = escMonitor {
                 NSEvent.removeMonitor(monitor)
                 escMonitor = nil
@@ -583,19 +716,23 @@ struct OverlayView: View {
 
     // MARK: - Input Bar
 
-    /// ASCII face-state mascot — lives top-right, mirrors the macOS close button.
+    /// ASCII face-state mascot — lives top-left, near the macOS close button.
     /// Changes with pipeline phase (idle → thinking → found → confused → error).
-    /// Color-coded, spring-bouncing, gently animated. The face IS the status indicator.
+    /// Color-coded, smoothly morphing between expressions.
     private var compyFace: some View {
+        faceView(size: 18)
+            .offset(y: state.faceFloatOffset)
+            .padding(.top, 6)
+            .padding(.leading, 52)  // clear of traffic-light buttons
+    }
+
+    /// Reusable face view — size-scalable for different contexts (corner, empty state, results).
+    private func faceView(size: CGFloat) -> some View {
         Text(state.displayedFace)
-            .font(.system(size: 18, weight: .medium, design: .monospaced))
+            .font(.system(size: size, weight: .medium, design: .monospaced))
             .foregroundColor(state.faceColor)
             .scaleEffect(state.faceScale)
             .opacity(state.faceOpacity)
-            .offset(y: state.faceFloatOffset)
-            .shadow(color: state.faceGlowColor, radius: state.faceGlowRadius, x: 0, y: 0)
-            .padding(.top, 6)
-            .padding(.trailing, 10)
     }
 
     // MARK: - Input Bar
@@ -745,6 +882,43 @@ struct OverlayView: View {
 
     private var repoRoot: URL { Self.resolveRepoRoot() }
 
+    /// Resolve the active workspace for search — the directory ripgrep should scan.
+    /// Priority: 1) extension's workspaceRoot (validated), 2) git root derived from
+    /// selection file, 3) COMPY_ROOT fallback (compy/ itself).
+    static func resolveActiveWorkspace(
+        extRoot: String?,
+        selectionFile: String?,
+        fallbackRoot: String
+    ) -> String {
+        // 1) Extension provided a valid workspace — use it.
+        //    Reject "/" (the extension's fallback when no workspace is open)
+        //    so ripgrep never tries to search the entire filesystem root.
+        if let root = extRoot, !root.isEmpty, root != "/" {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue {
+                return root
+            }
+        }
+        // 2) Walk up from selection file to find a git repo root.
+        if let file = selectionFile, !file.isEmpty {
+            var current = URL(fileURLWithPath: file).deletingLastPathComponent()
+            for _ in 0..<8 {  // walk up at most 8 levels
+                let gitDir = current.appendingPathComponent(".git")
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: gitDir.path, isDirectory: &isDir) {
+                    return current.path
+                }
+                // Also check if we hit the filesystem root.
+                if current.path == "/" || current.pathComponents.count <= 1 {
+                    break
+                }
+                current = current.deletingLastPathComponent()
+            }
+        }
+        // 3) Fall back to COMPY_ROOT.
+        return fallbackRoot
+    }
+
     /// Spawn whisper.cpp recording: burst-capture 4s of mic audio,
     /// transcribe, set text. Push-to-talk model — click to record, click to stop.
     /// Continuous: restarts after each burst with 400ms backoff.
@@ -869,12 +1043,8 @@ struct OverlayView: View {
     private var emptyState: some View {
         VStack(spacing: 14) {
             // Compy face center-stage — large, the focal point of the overlay.
-            Text(state.displayedFace)
-                .font(.system(size: 48, weight: .light, design: .monospaced))
-                .foregroundColor(state.faceColor)
-                .scaleEffect(state.faceScale)
+            faceView(size: 48)
                 .offset(y: state.faceFloatOffset)
-                .shadow(color: state.faceGlowColor, radius: state.faceGlowRadius, x: 0, y: 2)
                 .onAppear { state.startIdleFloat() }
                 .onDisappear { state.stopIdleFloat() }
 
@@ -933,6 +1103,11 @@ struct OverlayView: View {
 
     private var processingState: some View {
         VStack(spacing: 0) {
+            // Compy face — present during search, morphs to thinking expression.
+            faceView(size: 28)
+                .padding(.top, 20)
+                .padding(.bottom, 8)
+
             TypingProgressView(messages: progressMessages)
                 .frame(maxWidth: .infinity)
 
@@ -967,6 +1142,10 @@ struct OverlayView: View {
 
     private var noMatchState: some View {
         VStack(spacing: 10) {
+            // Compy looking confused.
+            faceView(size: 36)
+                .padding(.bottom, 4)
+
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 26, weight: .light))
                 .foregroundColor(.secondary)
@@ -1012,6 +1191,10 @@ struct OverlayView: View {
 
     private var resultHeader: some View {
         HStack {
+            // Compy face — small, satisfied expression when results found.
+            faceView(size: 16)
+                .padding(.trailing, 2)
+
             Text(resultHeaderCopy)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.secondary)
@@ -1106,16 +1289,13 @@ struct OverlayView: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // Use the extension's workspaceRoot when valid (points to the user's
-            // actual target project in agy-ide), falling back to repoRoot only
-            // when the extension value is missing, empty, or not a real directory.
-            var activeWorkspace = repoRoot.path
-            if let extRoot = state.workspaceRoot, !extRoot.isEmpty {
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: extRoot, isDirectory: &isDir), isDir.boolValue {
-                    activeWorkspace = extRoot
-                }
-            }
+            // Resolve the active workspace — the directory ripgrep searches.
+            // Priority: extension workspaceRoot > derived from selection file > COMPY_ROOT.
+            let activeWorkspace = Self.resolveActiveWorkspace(
+                extRoot: state.workspaceRoot,
+                selectionFile: state.selectionFile,
+                fallbackRoot: repoRoot.path
+            )
             // Always send a Selection so the daemon receives the correct
             // workspace_root — even when no text/file was selected.
             let sel = Selection(
