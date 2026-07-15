@@ -48,6 +48,17 @@ export function activate(context: vscode.ExtensionContext): void {
     () => sendSelectionEnvelope(),
   );
   context.subscriptions.push(wsDisposable);
+
+  // Re-write when the window gains focus — fixes the codebase-switching bug
+  // where returning to a previously-active window with the same editor doesn't
+  // fire onDidChangeActiveTextEditor, leaving a stale workspaceRoot in the
+  // envelope from the last project the user switched away from.
+  const focusDisposable = vscode.window.onDidChangeWindowState((e) => {
+    if (e.focused) {
+      sendSelectionEnvelope();
+    }
+  });
+  context.subscriptions.push(focusDisposable);
 }
 
 function sendSelectionEnvelope(): void {

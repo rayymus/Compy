@@ -14,13 +14,17 @@ Compy is a Spotlight-like popup that answers codebase questions without leaving 
 - **"Who added this null check?"** — git blame and commit history
 - **"What breaks if I change this?"** — blast radius via call graph
 - **"Paste a stack trace"** — jumps straight to each frame's source
+- **"How does auth flow work?"** — structural digest via code graph, module map + key symbols
+- **"Ask a follow-up…"** — overlay stays open, type another question after results
 
 Every result is clickable — jumps directly to `file:line` in your editor.
 
 Compy has a personality: an ASCII face-state mascot that blinks, winks, and
 darts its eyes while searching, then morphs smoothly between expressions as the
-pipeline progresses (idle → thinking → found → confused). Not a chatbot — a
-status indicator wearing a mascot costume.
+pipeline progresses (idle → thinking → found → confused). The face changes with
+the backend that answered (tier-of-origin): different eye states for LLM-ranked
+vs heuristic vs graph-derived results. Not a chatbot — a status indicator
+wearing a mascot costume.
 
 ---
 
@@ -150,18 +154,23 @@ Your question (voice or text)
 
 - **Global hotkey** (Cmd+Shift+Space) — overlay opens top-right, gets keyboard focus
 - **Voice + text input** — push-to-talk STT via whisper.cpp (offline, zero permissions)
-- **7 intent types** — history, relational, references, definition, fuzzy, trace, rationale
-- **6 backends** — Freebuff, Ollama, heuristic, stub, Graphify, Git history
+- **9 intent types** — history, relational, references, definition, fuzzy, trace, rationale, blast_radius, overview
+- **6 backends** — Ollama, heuristic, stub, Graphify, Git history, ripgrep (Freebuff env-gated)
+- **Catch-up Q&A** — "how does X work" produces a structural digest via Graphify (module map + key symbols)
+- **Session memory** — overlay stays open, type follow-up questions, previous results preserved dimmed
+- **Graph auto-update** — graph rebuilds automatically when .py files are newer than the cached graph
+- **Tier-of-origin face** — face changes eyes/color based on which backend answered (LLM vs heuristic vs graph)
 - **Personality system** — greeting variation, staggered result reveals, haptic feedback,
   playful result headers, no-match hint pool, mic pulse rings
-- **Face-state mascot** — 7 ASCII faces mapped to pipeline phases, smooth morph transitions,
-  periodic blinking (every 3-5s, 15% wink chance), eye darting during processing
+- **Face-state mascot** — 10+ ASCII faces mapped to pipeline phases + backend tier, smooth morph transitions,
+  periodic blinking (every 3-5s, 15% wink chance), eye darting during processing, idle eye shifts
 - **Compact/expand** — 72px input bar → 420px on results with smooth animation
 - **Jump-to-editor** — click any result to open at file:line in agy-ide/cursor/code
 - **Comment filtering** — grep results skip comment-only lines
 - **CamelCase keyword splitting** — "handleRequest" splits to "handle" + "request" for better fuzzy search
 - **Typing animation** — randomized quips during processing (16 messages across 3 pools)
 - **Stale envelope rejection** — extension workspaceRoot validated by timestamp, falls back to git root
+- **Parse decision logging** — every parser classification logged to /tmp/compy-parse-decisions.log for future ML training
 
 ---
 

@@ -49,16 +49,17 @@ final class HotkeyManager {
                 pasteboard.setString(old, forType: .string)
             }
 
-            // Read the extension's selection envelope, but reject stale entries.
-            // The extension writes proactively on workspace/editor changes, so a
-            // fresh envelope confirms the real active workspace. If the JSON is
-            // > 5 seconds old, the extension didn't fire (editor out of focus) —
-            // discard workspaceRoot and let resolveActiveWorkspace take over.
+            // Read the extension's selection envelope.
+            // The extension writes proactively on activation, editor change,
+            // workspace-folder change, AND window-focus — so the envelope is
+            // always current for the focused editor window. We only reject
+            // workspaceRoot when the envelope is > 5 minutes old, which means
+            // the extension isn't running and the file is from a prior session.
             var workspaceRoot: String? = nil
             var selectionFile: String? = nil
             var selectionLine: Int? = nil
             var selectionText: String? = selectedText
-            let maxStaleness: TimeInterval = 5  // seconds
+            let maxStaleness: TimeInterval = 300  // 5 minutes — generous, rejects only abandoned sessions
 
             if let data = try? Data(contentsOf: URL(fileURLWithPath: self.selectionFile)),
                let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

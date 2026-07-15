@@ -409,6 +409,10 @@ final class OverlayState: ObservableObject {
         case ">o<": return "-o-"
         case ">!?<": return "-!?-"
         case ">x_<": return "-x_-"
+        case ">°°<": return "-°°-"   // heuristic tier
+        case ">-o<": return "--o-"   // grep/stub tier
+        case ">O<": return "-O-"    // graph tier
+        case ">*<": return "-*-"    // git tier
         default: return baseFace
         }
     }
@@ -422,6 +426,36 @@ final class OverlayState: ObservableObject {
         }
     }
 
+    /// Subtle idle animation variants — Compy looks around naturally.
+    /// Triggered every 8-12s on a separate timer during .empty phase.
+    private var idleShiftTimer: Timer?
+
+    func startIdleShifts() {
+        scheduleIdleShift()
+    }
+
+    private func scheduleIdleShift() {
+        let interval = TimeInterval.random(in: 8...12)
+        idleShiftTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            guard let self = self, self.phase == .empty else { return }
+            // Quick eye dart — Compy glances around.
+            let glances = ["<.<", ">.>", ">_>"]
+            let glance = glances.randomElement()!
+            let holdDuration = 0.2
+            self.eyeDart = glance
+            DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
+                self?.eyeDart = nil
+            }
+            self.scheduleIdleShift()
+        }
+    }
+
+    func stopIdleShifts() {
+        idleShiftTimer?.invalidate()
+        idleShiftTimer = nil
+        eyeDart = nil
+    }
+
     /// Scale: 1.0 = normal, dips to 0.92 during morph dissolve then eases back.
     @Published var faceScale: CGFloat = 1.0
 
@@ -432,22 +466,50 @@ final class OverlayState: ObservableObject {
     @Published var faceFloatOffset: CGFloat = 0
 
     /// The intended face for the current pipeline phase (without flicker protection).
+    /// Tier-of-origin: when results come from heuristic/stub/grep instead of ollama/freebuff,
+    /// the face shows a subtle eye-state difference — addressing Claude's risk #1 that
+    /// cascading fallback hides which tier answered with what confidence.
     var intendedFace: String {
         switch phase {
         case .empty: return ">-<"
         case .processing: return selectionText.isEmpty ? ">•_•<" : ">.>"
-        case .results: return ">o<"
+        case .results: return tierResultsFace
         case .noMatch: return ">!?<"
         case .degraded: return ">x_<"
         }
     }
 
+    /// Results face varies by which backend actually answered.
+    /// Tier-of-origin: ollama gets full-confidence eyes, heuristic gets approximate,
+    /// degraded gets the existing error face. trace source stays standard.
+    private var tierResultsFace: String {
+        switch sourceLabel {
+        case "ollama", "freebuff": return ">o<"      // LLM ranked — confident found
+        case "heuristic": return ">°°<"               // offline ranked — approximate match
+        case "grep", "stub": return ">-o<"             // unranked / stub — uncertain find
+        case "graph": return ">O<"                     // graph-derived — structural match
+        case "trace": return ">o<"                     // stack trace — exact match
+        case "git": return ">*<"                       // git history — historical info
+        default: return ">o<"
+        }
+    }
+
     /// Color for the current face — meaningful per state.
+    /// Tier-of-origin awareness: result colors reflect backend confidence tier.
     var faceColor: Color {
         switch phase {
         case .empty: return Color(NSColor.tertiaryLabelColor)
         case .processing: return .blue
-        case .results: return .green
+        case .results:
+            switch sourceLabel {
+            case "ollama", "freebuff": return .green
+            case "heuristic": return .mint
+            case "grep", "stub": return .teal
+            case "graph": return .cyan
+            case "git": return .indigo
+            case "trace": return .green
+            default: return .green
+            }
         case .noMatch: return .orange
         case .degraded: return .red
         }
@@ -649,6 +711,7 @@ final class OverlayState: ObservableObject {
         faceTransitioning = false
         stopBlinkTimer()
         stopDartTimer()
+        stopIdleShifts()
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
     }
@@ -724,6 +787,7 @@ struct OverlayView: View {
         }
         .onAppear {
             state.startBlinkTimer()
+            state.startIdleShifts()
             escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.keyCode == UInt16(kVK_Escape) {
                     OverlayController.shared.hide()
@@ -735,6 +799,7 @@ struct OverlayView: View {
         .onDisappear {
             state.stopRecording()
             state.stopBlinkTimer()
+            state.stopIdleShifts()
             if let monitor = escMonitor {
                 NSEvent.removeMonitor(monitor)
                 escMonitor = nil
@@ -745,13 +810,16 @@ struct OverlayView: View {
     // MARK: - Input Bar
 
     /// ASCII face-state mascot — lives top-left, near the macOS close button.
-    /// Changes with pipeline phase (idle → thinking → found → confused → error).
-    /// Color-coded, smoothly morphing between expressions.
+    /// Hidden during processing/results since the face appears in the content area.
+    /// Visible during .empty and .noMatch phases as a corner badge.
+    @ViewBuilder
     private var compyFace: some View {
-        faceView(size: 18)
-            .offset(y: state.faceFloatOffset)
-            .padding(.top, 6)
-            .padding(.leading, 52)  // clear of traffic-light buttons
+        if state.phase == .empty || state.phase == .noMatch {
+            faceView(size: 18)
+                .offset(y: state.faceFloatOffset)
+                .padding(.top, 6)
+                .padding(.leading, 52)  // clear of traffic-light buttons
+        }
     }
 
     /// Reusable face view — size-scalable for different contexts (corner, empty state, results).
@@ -1260,10 +1328,15 @@ struct OverlayView: View {
         return "\(n) result\(n == 1 ? "" : "s")"
     }
 
+    /// Color-coded by backend tier — matches the tier-of-origin face system.
     private var sourceBadgeColor: Color {
         switch state.sourceLabel {
         case "freebuff", "ollama": return .green
         case "heuristic": return .blue
+        case "graph": return .cyan
+        case "trace": return .green
+        case "git": return .indigo
+        case "grep", "stub": return .teal
         default: return .orange
         }
     }

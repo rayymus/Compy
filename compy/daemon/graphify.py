@@ -426,6 +426,47 @@ class GraphQuerier:
                 merged.append(hit)
         return tuple(merged)
 
+    def query_overview(self) -> tuple[GrepHit, ...]:
+        """Structural digest: module map with entry points and key symbols.
+
+        Returns one hit per module (file), with a snippet summarizing its
+        exported functions/classes and role in the codebase. Useful for
+        catch-up Q&A like "how does X work" or "what are the key modules."
+        """
+        if self._graph is None:
+            return ()
+        # Collect modules and their symbols.
+        modules: dict[str, dict[str, list[str]]] = {}  # file → {kind: [name, ...]}
+        for node_id, data in self._graph.nodes(data=True):
+            kind = data.get("kind", "")
+            if kind in ("function", "class"):
+                file = data.get("file", node_id.split("::")[0])
+                name = node_id.rsplit("::", 1)[-1]
+                if file not in modules:
+                    modules[file] = {}
+                if kind not in modules[file]:
+                    modules[file][kind] = []
+                modules[file][kind].append(name)
+
+        hits: list[GrepHit] = []
+        for file, kinds in sorted(modules.items()):
+            funcs = kinds.get("function", [])
+            classes = kinds.get("class", [])
+            parts: list[str] = []
+            if funcs:
+                # Show at most 5 function names per module.
+                shown = funcs[:5]
+                suffix = f" +{len(funcs) - 5} more" if len(funcs) > 5 else ""
+                parts.append(f"{len(funcs)} function{'s' if len(funcs) != 1 else ''}: {', '.join(shown)}{suffix}")
+            if classes:
+                shown = classes[:3]
+                suffix = f" +{len(classes) - 3} more" if len(classes) > 3 else ""
+                parts.append(f"{len(classes)} class{'es' if len(classes) != 1 else ''}: {', '.join(shown)}{suffix}")
+            snippet = " · ".join(parts) if parts else f"module {file}"
+            hits.append(GrepHit(file=file, line=1, column=0, snippet=snippet[:300]))
+
+        return tuple(hits)
+
     def query_dead_code(self) -> tuple[GrepHit, ...]:
         """Find functions/classes with zero callers (likely dead code)."""
         if self._graph is None:

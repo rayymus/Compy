@@ -156,8 +156,31 @@ def _evaluate(
     if parsed.confidence < FUZZY_THRESHOLD:
         parsed = replace(parsed, intent="fuzzy")
 
-    # Convention / dedup / overview path: route to fuzzy semantic search.
-    if parsed.intent in ("convention", "dedup", "overview"):
+    # Convention / dedup path: route to fuzzy semantic search.
+    if parsed.intent in ("convention", "dedup"):
+        parsed = replace(parsed, intent="fuzzy")
+
+    # --- Overview / catch-up Q&A path: structural digest via Graphify ---
+    if parsed.intent == "overview":
+        if grapher is not None:
+            try:
+                grapher.load(workspace)
+            except ReasonerUnavailable:
+                pass  # Fall through to fuzzy.
+            else:
+                candidates = grapher.query_overview()
+                if candidates:
+                    # Overview hits are descriptive — no reasoner ranking needed.
+                    # Promote directly with the graph source label.
+                    hits = tuple(
+                        RankedHit(
+                            file=h.file, line=h.line, snippet=h.snippet,
+                            score=1.0, source="graph",
+                        )
+                        for h in candidates
+                    )
+                    return parsed, hits, False, None
+            # Graph unavailable or returned empty — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
     # --- Dead-code path: find unused symbols via Graphify ---

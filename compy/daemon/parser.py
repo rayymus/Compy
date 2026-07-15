@@ -150,7 +150,13 @@ def _extract_keywords(question: str) -> tuple[str, ...]:
 
 
 class RuleBasedParser:
-    """Deterministic rule-based parser. The spec's ML-shaped-but-feasible v1 safe choice."""
+    """Deterministic rule-based parser. The spec's ML-shaped-but-feasible v1 safe choice.
+
+    Each parse decision is logged to /tmp/compy-parse-decisions.log — this is the dataset
+    that P5's MLX/Ollama parser replacement will train on. Claude's deep-reasoning flagged
+    that 102 passing tests prove stability, not real-world accuracy on actual user phrasing.
+    Logging decisions now builds the training corpus before the replacement exists.
+    """
 
     def parse(self, question: str, selection_text: str | None) -> ParsedQuery:
         has_sel = bool(selection_text)
@@ -159,17 +165,40 @@ class RuleBasedParser:
         keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview") else ()
         if has_sel and symbol:
             confidence = min(1.0, confidence + _SELECTION_SYMBOL_BONUS)
-        # Symbol is extracted whenever the selection provides one. The orchestrator decides
-        # whether to use it (intent="references"/"definition") or ignore it (intent="fuzzy"
-        # branches on keywords). Earlier we cleared symbol for fuzzy, but that forced tests
-        # to fudge the question to land in a non-fuzzy intent — the contract is cleaner if
-        # the parser exposes everything it extracted and lets the orchestrator route.
-        return ParsedQuery(
+
+        result = ParsedQuery(
             intent=intent,
             symbol=symbol,
             keywords=keywords,
             confidence=round(confidence, 2),
         )
+        _log_parse_decision(question, has_sel, result)
+        return result
+
+
+def _log_parse_decision(question: str, has_selection: bool, result: ParsedQuery) -> None:
+    """Log parse decisions for P5 training data.
+
+    Each entry is a JSON line written to /tmp/compy-parse-decisions.log.
+    Non-essential — failures are swallowed silently so the pipeline never
+    breaks on logging.
+    """
+    try:
+        import json
+        from pathlib import Path
+        entry = json.dumps({
+            "question": question[:200],
+            "has_selection": has_selection,
+            "intent": result.intent,
+            "symbol": result.symbol,
+            "keywords": list(result.keywords),
+            "confidence": result.confidence,
+        })
+        log_path = Path("/tmp/compy-parse-decisions.log")
+        with open(log_path, "a") as f:
+            f.write(entry + "\n")
+    except Exception:
+        pass  # Never let logging break the pipeline.
 
 
 # Convenience for callers that treat parsing as a function call.

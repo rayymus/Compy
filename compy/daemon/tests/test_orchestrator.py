@@ -208,3 +208,27 @@ def test_empty_question_returns_empty():
     assert result.hits == ()
     assert g.calls == []
     assert r.calls == []
+
+
+# ---------- overview routing -----------------------------------------------
+
+def test_overview_intent_falls_to_fuzzy_without_graph():
+    """Overview intent without a grapher should fall through to fuzzy branch.
+
+    Regression: when overview was separated from the convention/dedup/overview
+    fallback block, queries like "how does parsing work" that match the overview
+    pattern but have no graph available were returning "no actionable intent"
+    instead of falling through to keyword grep.
+    """
+    parse_hit = _hit("/x.py", 5, "def parse_query(): pass")
+    g = StubGrepper((parse_hit,))
+
+    request = QueryRequest(question="how does parsing work")
+    result = run_pipeline(
+        request,
+        parser=RuleBasedParser(), grepper=g, reasoners=(StubReasoner(),),
+    )
+    # Should fall through to fuzzy, not return "no actionable intent".
+    patterns_tried = [p for p, _ in g.calls]
+    assert patterns_tried, f"expected keyword grep, got intent={result.intent}"
+    assert any(p in {"how", "parsing", "work"} for p in patterns_tried)
