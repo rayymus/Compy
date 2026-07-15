@@ -276,8 +276,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
         line: Int? = nil,
         workspaceRoot: String? = nil
     ) {
-        if panel != nil {
-            hide()
+        if let panel = panel {
+            // Session memory: hotkey toggles visibility, not state.
+            // If the panel is currently key (visible and focused), dismiss it.
+            // If it's not key (hidden behind other windows or resigned),
+            // bring it back — preserving all session state.
+            if panel.isKeyWindow {
+                hide()
+            } else {
+                panel.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
         } else {
             show(selectedText: selectedText, file: file, line: line, workspaceRoot: workspaceRoot)
         }
@@ -286,7 +295,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
     // MARK: NSWindowDelegate — click-outside dismiss
 
     func windowDidResignKey(_ notification: Notification) {
-        hide()
+        // Session memory: only dismiss on click-outside when the overlay is idle
+        // or in a terminal state that doesn't warrant keeping open.
+        // When results are showing or degraded, the user may click back into the
+        // overlay to continue the session — don't close on them.
+        if state.phase == .empty || state.phase == .noMatch || state.phase == .processing {
+            hide()
+        }
+        // .results and .degraded: panel loses key but stays open.
+        // The user can click back into it to type a follow-up question.
     }
 
     private func alignTopRight(_ panel: CompyPanel) {
@@ -660,6 +677,17 @@ struct OverlayView: View {
         return true
     }
 
+    /// Placeholder hint that adapts to session state.
+    /// When results are showing, prompt for a follow-up instead of the default.
+    private var followUpPlaceholder: String {
+        if state.phase == .results || state.phase == .degraded {
+            return "Ask a follow-up…"
+        } else if state.phase == .noMatch {
+            return "Try a different query…"
+        }
+        return "Search codebase..."
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
@@ -755,7 +783,7 @@ struct OverlayView: View {
             } else if state.isRecording {
                 recordingIndicator
             } else {
-                TextField("Search codebase...", text: $state.text)
+                TextField(followUpPlaceholder, text: $state.text)
                     .textFieldStyle(.plain)
                     .font(.system(size: 18))
                     .focused($isFocused)
@@ -769,8 +797,17 @@ struct OverlayView: View {
                 Button(action: {
                     withAnimation(.easeOut(duration: 0.15)) {
                         state.text = ""
-                        state.phase = .empty
-                        state.results = []
+                        // Session memory: clearing text during results keeps results visible
+                        // but resets to compact. User can type a new query.
+                        if state.phase == .results || state.phase == .degraded {
+                            state.previousResults = state.results
+                            state.phase = .empty
+                            state.results = []
+                        } else {
+                            state.phase = .empty
+                            state.results = []
+                            state.previousResults = []
+                        }
                     }
                 }) {
                     Image(systemName: "xmark.circle.fill")
@@ -1157,7 +1194,7 @@ struct OverlayView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
-            Text("Esc to dismiss")
+            Text("Esc to dismiss  ·  Type a new query to try again")
                 .font(.system(size: 11))
                 .foregroundColor(Color(NSColor.tertiaryLabelColor))
                 .padding(.top, 8)
@@ -1281,8 +1318,12 @@ struct OverlayView: View {
 
         withAnimation(.easeOut(duration: 0.15)) {
             state.phase = .processing
-            // Preserve previous results dimmed (session memory) while new query runs.
-            state.previousResults = state.results
+            // Preserve current results dimmed (session memory) while new query runs.
+            // Only overwrite previousResults if there are results to preserve —
+            // don't clobber results that the clear button already preserved.
+            if !state.results.isEmpty {
+                state.previousResults = state.results
+            }
             state.results = []
             state.reasonText = nil
             state.resultHeaderText = ""
@@ -1395,6 +1436,7 @@ struct OverlayView: View {
                             }
                         }
                         state.previousResults = []  // clear old results on success
+                        state.text = ""  // clear text so user can type follow-up immediately
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
                             state.reasonText = result.reason

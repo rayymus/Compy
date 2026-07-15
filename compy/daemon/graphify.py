@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import pickle
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -270,25 +271,81 @@ def _resolve_callee(name: str, current_file: str, graph: nx.DiGraph) -> str | No
 class GraphBuilder:
     """Builds and caches a code-knowledge graph for a workspace."""
 
+    # Number of seconds to cache the staleness check result.
+    # Avoids walking the entire workspace tree on every query.
+    _staleness_cache_ttl: float = 5.0
+
     def __init__(self, cache_dir: Path | None = None) -> None:
         self._cache_dir = cache_dir or CACHE_DIR
+        # Per-workspace staleness cache: (checked_at_timestamp, is_stale)
+        self._staleness: dict[str, tuple[float, bool]] = {}
+
+    def _is_stale(self, workspace_root: str, cache_path: Path) -> bool:
+        """Check if any .py file in the workspace is newer than the cached graph.
+
+        Result is cached for _staleness_cache_ttl seconds so repeated queries
+        don't walk the full tree every time.
+        """
+        now = time.time()
+        cached = self._staleness.get(workspace_root)
+        if cached is not None:
+            checked_at, was_stale = cached
+            if now - checked_at < self._staleness_cache_ttl:
+                return was_stale
+
+        try:
+            cache_mtime = cache_path.stat().st_mtime
+        except OSError:
+            self._staleness[workspace_root] = (now, True)
+            return True  # No cache → stale by definition.
+
+        ws_path = Path(workspace_root)
+        if not ws_path.is_dir():
+            self._staleness[workspace_root] = (now, False)
+            return False
+
+        # Walk all .py files — stop early if any is newer than the cache.
+        try:
+            for py_file in ws_path.rglob("*.py"):
+                # Skip hidden dirs and caches.
+                parts = py_file.parts
+                if any(p.startswith(".") for p in parts):
+                    continue
+                if "__pycache__" in str(py_file):
+                    continue
+                try:
+                    if py_file.stat().st_mtime > cache_mtime:
+                        self._staleness[workspace_root] = (now, True)
+                        return True
+                except OSError:
+                    continue
+        except (OSError, PermissionError):
+            pass  # Can't walk — assume not stale (don't force a rebuild).
+
+        self._staleness[workspace_root] = (now, False)
+        return False
 
     def get_graph(self, workspace_root: str, *, force_rebuild: bool = False) -> nx.DiGraph:
-        """Return the cached graph, building it if necessary."""
+        """Return the cached graph, auto-rebuilding if workspace files are newer."""
         cache_key = _cache_key(workspace_root)
         cache_path = self._cache_dir / cache_key
 
         if not force_rebuild and cache_path.exists():
-            try:
-                with open(cache_path, "rb") as f:
-                    return pickle.load(f)
-            except (pickle.PickleError, EOFError):
-                pass  # Corrupt cache — rebuild.
+            if self._is_stale(workspace_root, cache_path):
+                force_rebuild = True
+            else:
+                try:
+                    with open(cache_path, "rb") as f:
+                        return pickle.load(f)
+                except (pickle.PickleError, EOFError):
+                    pass  # Corrupt cache — rebuild.
 
         graph = _build_graph(workspace_root)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         with open(cache_path, "wb") as f:
             pickle.dump(graph, f)
+        # Invalidate staleness cache after rebuild.
+        self._staleness.pop(workspace_root, None)
         return graph
 
     def clear_cache(self, workspace_root: str) -> None:
