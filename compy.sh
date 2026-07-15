@@ -66,7 +66,7 @@ cmd_overlay() {
     # Kill any stale overlay instances so only one runs.
     pkill -f "Compy$" 2>/dev/null && sleep 0.3 || true
     echo "Launching Compy overlay..."
-    COMPY_ROOT="$ROOT" .build/debug/Compy &
+    COMPY_SKIP_FREEBUFF=1 COMPY_ROOT="$ROOT" .build/debug/Compy &
     echo "  PID: $!"
     echo "  Press Cmd+Shift+Space to trigger."
     echo ""
@@ -76,7 +76,7 @@ cmd_overlay() {
 
 cmd_query() {
     cd "$ROOT"
-    python3 -m compy.daemon --reasoner stub
+    COMPY_SKIP_FREEBUFF=1 python3 -m compy.daemon --reasoner stub
 }
 
 cmd_install() {
@@ -101,7 +101,7 @@ cmd_install() {
     echo "   → $ROOT/compy/swift/.build/debug/Compy"
     echo ""
     echo "Hotkey: Cmd+Shift+Space"
-    echo "Backends: freebuff → ollama → heuristic → stub"
+    echo "Backends: ollama → heuristic → stub (freebuff skipped via COMPY_SKIP_FREEBUFF=1 until -p flag ships)"
     echo "STT: whisper.cpp (tiny.en) via ffmpeg mic capture"
 }
 

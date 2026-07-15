@@ -115,9 +115,22 @@ def _build_reasoners(pinned: str | None) -> tuple:
     When `--reasoner stub` is pinned, the chain is *just* a single StubReasoner — there is
     no reason to tack another StubReasoner on its tail (the user explicitly asked for stub
     and it already succeeds by definition).
+
+    Set COMPY_SKIP_FREEBUFF=1 to omit FreebuffReasoner from the default chain entirely.
+    Freebuff CLI v0.0.122 has no -p flag, so every query pays ~200-500ms of wasted
+    subprocess spawn + error before falling through. This env var skips that waste.
     """
+    import os
+    skip_freebuff = os.environ.get("COMPY_SKIP_FREEBUFF") == "1"
+    # HeuristicReasoner is appended as the offline safety tail below —
+    # including it in the head as well would double-invoke it per query.
+    default_chain = (
+        (OllamaReasoner(),)
+        if skip_freebuff
+        else (FreebuffReasoner(), OllamaReasoner())
+    )
     chains = {
-        None: (FreebuffReasoner(), OllamaReasoner(), HeuristicReasoner()),
+        None: default_chain,
         "freebuff": (FreebuffReasoner(),),
         "ollama": (OllamaReasoner(),),
         "heuristic": (HeuristicReasoner(),),
