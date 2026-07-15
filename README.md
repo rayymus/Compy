@@ -32,17 +32,19 @@ wearing a mascot costume.
 
 ### Prerequisites
 - **macOS** on Apple Silicon (M-series)
-- **Python 3.11+** with `tree-sitter`, `tree-sitter-python`, `networkx`
+- **Python 3.11+**
 - **Swift toolchain** (Xcode or Command Line Tools)
+- **ripgrep** (`brew install ripgrep`) — required, the grep backend
 - **Ollama** — optional, for LLM-ranked results (`brew install ollama`)
-- **whisper-cpp** — for voice input (`brew install whisper-cpp`)
+- **whisper-cpp** + **ffmpeg** — for voice input (`brew install whisper-cpp ffmpeg`)
 
 ```sh
 # 1. Install Python deps
-pip install tree-sitter tree-sitter-python networkx
+pip install -r requirements.txt
 
-# 2. Install system tools (optional but recommended)
-brew install ollama whisper-cpp ffmpeg
+# 2. Install system tools
+brew install ripgrep                    # required
+brew install ollama whisper-cpp ffmpeg  # optional but recommended
 
 # 3. Pull the Ollama model (for ranked results)
 ollama pull qwen2.5-coder:1.5b
@@ -75,9 +77,9 @@ Then load `compy/extension/` as an unpacked extension in VS Code / Antigravity I
 After making changes, verify everything works:
 
 ```sh
-# 1. Run the daemon test suite (102 tests)
+# 1. Run the daemon test suite (103 tests)
 ./compy.sh test
-# Expected: 102 passed, 1 skipped, 0 failed
+# Expected: 103 passed, 1 skipped, 0 failed
 
 # 2. Build the Swift overlay (catches compile errors)
 ./compy.sh overlay
@@ -139,7 +141,7 @@ Your question (voice or text)
 | Command | What it does |
 |---------|-------------|
 | `./compy.sh overlay` | Build and launch the Swift/SwiftUI overlay |
-| `./compy.sh build` | Run all 102 tests + compile extension + build overlay |
+| `./compy.sh build` | Run all 103 tests + compile extension + build overlay |
 | `./compy.sh test` | Run daemon tests only |
 | `./compy.sh listen` | Start UNIX socket listener (for extension selection) |
 | `./compy.sh query` | Pipe a JSON query into the daemon |
@@ -177,8 +179,9 @@ Your question (voice or text)
 ## Requirements
 
 - macOS on Apple Silicon (M-series)
-- Python 3.11+ with `tree-sitter`, `tree-sitter-python`, `networkx`
+- Python 3.11+ (see `requirements.txt`)
 - Swift toolchain (Xcode or Command Line Tools)
+- ripgrep — required, the grep backend
 - [Ollama](https://ollama.com) — optional, for LLM-ranked results
 - [whisper-cpp](https://github.com/ggerganov/whisper.cpp) + ffmpeg — for voice input
 

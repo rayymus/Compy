@@ -732,6 +732,8 @@ struct OverlayView: View {
     @EnvironmentObject var state: OverlayState
     @FocusState private var isFocused: Bool
     @State private var escMonitor: Any? = nil
+    /// Track copy feedback: briefly show checkmark after copy.
+    @State private var didCopy = false
 
     /// Only show the content area when there's something to display —
     /// keep the overlay compact (just the input bar) until a query is submitted.
@@ -1306,6 +1308,15 @@ struct OverlayView: View {
 
             Spacer()
 
+            // Copy all results as formatted text — session-export for sharing.
+            Button(action: copyResultsToClipboard) {
+                Image(systemName: copyIcon)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy all results as formatted text")
+
             Text(state.sourceLabel.capitalized)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(sourceBadgeColor)
@@ -1317,6 +1328,25 @@ struct OverlayView: View {
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 4)
+    }
+
+    private var copyIcon: String {
+        didCopy ? "checkmark" : "square.on.square"
+    }
+
+    /// Format all results as readable text and copy to system clipboard.
+    private func copyResultsToClipboard() {
+        let lines = state.results.map { hit in
+            "\(hit.file):\(hit.line)  [\(hit.source) \(Int(hit.score * 100))%]\n  \(hit.snippet.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        let text = lines.joined(separator: "\n\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        // Brief checkmark feedback
+        didCopy = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            didCopy = false
+        }
     }
 
     /// 80% standard count, 20% personality phrasing.
