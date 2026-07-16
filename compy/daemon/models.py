@@ -48,13 +48,18 @@ class GrepHit:
 
 @dataclass(frozen=True)
 class RankedHit:
-    """Final ranked result the overlay displays. `source` tells tests/UI where it came from."""
+    """Final ranked result the overlay displays. `source` tells tests/UI where it came from.
+
+    `structural_context` is an optional badge string like "Called by: login_handler, auth_mw"
+    populated from Graphify after ranking — shows callers/importers for the hit's symbol.
+    """
 
     file: str
     line: int
     snippet: str
     score: float
     source: str  # "grep" | "freebuff" | "ollama" | "stub"
+    structural_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,12 +68,17 @@ class QueryRequest:
 
     question: str
     selection: Selection | None = None
+    stream: bool = False  # when True, daemon emits intermediate candidates before ranking
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> QueryRequest:
         sel_raw = data.get("selection")
         selection = Selection(**sel_raw) if sel_raw else None
-        return cls(question=data["question"], selection=selection)
+        return cls(
+            question=data["question"],
+            selection=selection,
+            stream=data.get("stream", False),
+        )
 
 
 @dataclass(frozen=True)
@@ -79,8 +89,11 @@ class QueryResult:
     hits: tuple[RankedHit, ...] = field(default_factory=tuple)
     degraded: bool = False
     reason: str | None = None  # human-readable explanation when degraded=True
+    suggestions: tuple[str, ...] | None = None  # "did you mean X?" on no-match
 
 
 def to_json(obj: Any) -> str:
-    """Stable JSON serialization for dataclasses (handles tuples via default=str)."""
-    return json.dumps(asdict(obj), indent=2, default=str)
+    """Stable JSON serialization for dataclasses — compact (single-line) so the
+    overlay can split daemon stdout by newlines to separate stream events from
+    the final QueryResult.  Handles tuples via default=str."""
+    return json.dumps(asdict(obj), default=str)

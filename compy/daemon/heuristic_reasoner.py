@@ -2,11 +2,12 @@
 
 No LLM required. Scores candidates by:
   1. Jaccard token overlap between question and snippet (weight 0.25)
-  2. Filename relevance: query tokens matching filename components (0.20)
+  2. Filename relevance: query tokens matching filename components (0.15)
   3. Exact symbol match: query contains an identifier that appears in snippet (0.25)
   4. Same-directory boost when selection file and candidate share a parent dir (0.15)
-  5. Token frequency weighting: rare tokens weighted higher (0.15)
-  6. Test-file penalty for non-test queries (-0.10)
+  5. N-gram adjacency: query bigrams appearing in snippet (0.10)
+  6. Token frequency weighting: rare tokens weighted higher via local IDF (0.10)
+  7. Test-file penalty for non-test queries (-0.10)
 
 Scores are normalized to 0–1. This is the v1 "works offline, always available"
 fallback that makes results useful even without Ollama or Freebuff wired up.
@@ -87,10 +88,15 @@ def _exact_word_matches(query: str, snippet: str) -> float:
 
 
 def _token_rarity_weight(tokens: set[str], all_snippets: list[str]) -> dict[str, float]:
-    """Boost rare tokens, penalize common ones. Returns weight per token (0–1)."""
+    """Boost rare tokens, penalize common ones. Returns weight per token (0–1).
+
+    Uses a corpus-relative IDF: rarer tokens (appearing in fewer snippets) get higher
+    weight.  Common code tokens are zeroed entirely.  The all_snippets pool is the
+    grep candidate set, not the whole repo — this is intentionally local, not global
+    IDF, because the grep candidates are already filtered to the query's domain.
+    """
     if not tokens or not all_snippets:
         return {}
-    doc_count = len(all_snippets)
     weights: dict[str, float] = {}
     for tok in tokens:
         if tok in _COMMON_CODE_TOKENS:
@@ -98,18 +104,28 @@ def _token_rarity_weight(tokens: set[str], all_snippets: list[str]) -> dict[str,
             continue
         # Count how many snippets contain this token.
         appearing = sum(1 for s in all_snippets if tok in _tokenize(s))
-        # IDF-like: rarer tokens get higher weight.
+        # IDF-like: rarer tokens get higher weight.  Avoid divide-by-zero.
         idf = 1.0 / (1.0 + appearing)
         weights[tok] = round(idf, 3)
     return weights
-    """True if the filename looks like a test file (test_*.py, *_test.py, tests/*, etc.)."""
-    name = Path(path).name.lower()
-    # Only match word-boundary "test" — avoids false positives like "latest.py", "testing.py".
-    if name.startswith("test_") or name.startswith("test.") or name == "test.py":
-        return True
-    if "_test." in name or name.endswith("_test.py"):
-        return True
-    return False
+
+
+def _ngram_overlap(query: str, snippet: str, n: int = 2) -> float:
+    """Score snippet by how many query bigrams appear adjacent in the snippet.
+
+    Jaccard ignores word order — "user delete" and "delete user" score identically.
+    Bigram overlap catches adjacency: when the query's consecutive word pairs appear
+    in the snippet, the snippet is more likely relevant.
+    """
+    q_words = [w.lower() for w in _EXACT_WORD_RE.findall(query) if len(w) > 1]
+    s_words = [w.lower() for w in _EXACT_WORD_RE.findall(snippet)]
+    if len(q_words) < n or len(s_words) < n:
+        return 0.0
+    q_ngrams = {tuple(q_words[i:i + n]) for i in range(len(q_words) - n + 1)}
+    s_ngrams = {tuple(s_words[i:i + n]) for i in range(len(s_words) - n + 1)}
+    if not q_ngrams:
+        return 0.0
+    return len(q_ngrams & s_ngrams) / len(q_ngrams)
 
 
 class HeuristicReasoner:
@@ -150,7 +166,7 @@ class HeuristicReasoner:
             # 1. Jaccard overlap (0.25 weight).
             jaccard = _jaccard(q_tokens, s_tokens)
 
-            # 2. Filename relevance (0.20 weight).
+            # 2. Filename relevance (0.15 weight).
             fname_tokens = _filename_tokens(c.file)
             fname_overlap = _jaccard(q_tokens, fname_tokens)
 
@@ -160,7 +176,10 @@ class HeuristicReasoner:
             # 4. Same-directory boost (0.15 weight).
             dir_boost = 0.15 if _same_dir(selection_file, c.file) else 0.0
 
-            # 5. Token rarity: weighted Jaccard using IDF-like weights (0.15 weight).
+            # 5. N-gram adjacency: query bigrams appearing in snippet (0.10 weight).
+            ngram = _ngram_overlap(question, c.snippet)
+
+            # 6. Token rarity: weighted Jaccard using IDF-like weights (0.10 weight).
             rare_overlap = 0.0
             common = q_tokens & s_tokens
             if common:
@@ -171,10 +190,11 @@ class HeuristicReasoner:
 
             score = (
                 (jaccard * 0.25)
-                + (fname_overlap * 0.20)
+                + (fname_overlap * 0.15)
                 + (exact * 0.25)
                 + dir_boost
-                + (rare_overlap * 0.15)
+                + (ngram * 0.10)
+                + (rare_overlap * 0.10)
                 - test_penalty
             )
             raw.append((i, max(0.0, min(1.0, score))))

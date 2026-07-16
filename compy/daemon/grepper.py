@@ -28,9 +28,10 @@ _COMMENT_ONLY_RE = re.compile(
 class RipgrepGrepper:
     """Real ripgrep adapter. `rg --json` emits one JSON object per line of output."""
 
-    # Denylist globs — only exclude truly non-code files.
-    # Files like .html, .css, .yaml, .xml, .toml are legitimate source files
-    # in web/config-heavy projects. This list only blocks:
+    # Denylist globs — exclude non-code and documentation files.
+    # This list blocks:
+    #   - Documentation files (.md, .rst, .adoc) — README.md, CHANGELOG, etc.
+    #     Users searching for "where is handleRequest" want code, not docs.
     #   - Compiled/minified artifacts (.min.js, .map, .pyc, .class, .o, .so, .dylib)
     #   - Lock files (package-lock.json, yarn.lock, etc.)
     #   - Media & fonts (.png, .jpg, .gif, .ttf, .woff, .pdf, .ico, .svg)
@@ -38,8 +39,9 @@ class RipgrepGrepper:
     #   - Package directories (node_modules, __pycache__, .git)
     #   - Generated protobuf/bindings (.pb.go, .pb.cc, .d.ts)
     #   - Checksum files (.sum)
-    # Everything else passes through — all languages, all configs, all docs.
+    # Everything else passes through — all languages, all configs.
     _SKIP_GLOBS: tuple[str, ...] = (
+        "!*.md", "!*.rst", "!*.adoc",           # documentation
         "!*.min.js", "!*.min.css", "!*.min.js.map", "!*.min.css.map",
         "!*.map",
         "!*.pyc", "!*.pyo", "!*.class", "!*.o", "!*.obj", "!*.so", "!*.dylib",

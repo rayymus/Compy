@@ -23,12 +23,20 @@ struct RankedHit: Codable, Identifiable {
     let snippet: String
     let score: Double
     let source: String
+    /// Optional structural badge from Graphify: "Called by: login_handler, auth_mw"
+    let structuralContext: String?
+
+    enum CodingKeys: String, CodingKey {
+        case file, line, snippet, score, source
+        case structuralContext = "structural_context"
+    }
 }
 
 /// Mirrors compy.daemon.models.QueryRequest — what the daemon expects on stdin.
 struct QueryRequest: Codable {
     let question: String
     let selection: Selection?
+    let stream: Bool  // when true, daemon emits intermediate candidates before ranking
 }
 
 /// Selection with explicit CodingKeys for `workspace_root` (daemon uses snake_case).
@@ -50,6 +58,15 @@ struct QueryResult: Codable {
     let hits: [RankedHit]
     let degraded: Bool
     let reason: String?
+    let suggestions: [String]?  // "did you mean X?" on no-match
+}
+
+/// Intermediate streaming event: grep candidates emitted before ranking completes.
+/// The daemon writes this as the first JSON line when stream=true is set.
+struct StreamEvent: Codable {
+    let stream: String
+    let hits: [RankedHit]
+    let count: Int
 }
 
 /// Envelope from the VS Code companion extension, written to /tmp/compy-selection.json.

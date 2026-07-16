@@ -156,7 +156,7 @@ Your question (voice or text)
 
 - **Global hotkey** (Cmd+Shift+Space) — overlay opens top-right, gets keyboard focus
 - **Voice + text input** — push-to-talk STT via whisper.cpp (offline, zero permissions)
-- **9 intent types** — history, relational, references, definition, fuzzy, trace, rationale, blast_radius, overview
+- **10 intent types** — history, relational, references, definition, fuzzy, trace, rationale, blast_radius, overview, dead_code
 - **6 backends** — Ollama, heuristic, stub, Graphify, Git history, ripgrep (Freebuff env-gated)
 - **Catch-up Q&A** — "how does X work" produces a structural digest via Graphify (module map + key symbols)
 - **Session memory** — overlay stays open, type follow-up questions, previous results preserved dimmed
@@ -170,8 +170,14 @@ Your question (voice or text)
 - **Jump-to-editor** — click any result to open at file:line in agy-ide/cursor/code
 - **Comment filtering** — grep results skip comment-only lines
 - **CamelCase keyword splitting** — "handleRequest" splits to "handle" + "request" for better fuzzy search
+- **Keyword stemming** — "authenticated" matches "authenticate", suffix-stripping with correction map
+- **Synonym expansion** — queries like "bug" also match "error", "exception"; "auth" matches "login"
+- **Kebab-case support** — symbol extraction handles CSS classes, web components, Rust identifiers
+- **Multi-language trace detection** — Python, Node.js, Go, and Rust stack traces route to zero-LLM source jump
+- **Short-token whitelist** — two-char identifiers like `db`, `ui`, `io`, `id` preserved in keyword extraction
+- **N-gram adjacency ranking** — heuristic ranker considers word order ("user delete" vs "delete user")
 - **Typing animation** — randomized quips during processing (16 messages across 3 pools)
-- **Stale envelope rejection** — extension workspaceRoot validated by timestamp, falls back to git root
+- **Stale envelope rejection** — extension workspaceRoot validated by timestamp (300s window), falls back to git root
 - **Parse decision logging** — every parser classification logged to /tmp/compy-parse-decisions.log for future ML training
 
 ---

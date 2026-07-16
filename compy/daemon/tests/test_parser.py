@@ -61,7 +61,7 @@ def test_snake_case_symbol_preferred():
 
 def test_keywords_are_dedup_and_capped():
     parsed = _parse("find files files files in the repo repo")
-    assert list(parsed.keywords).count("files") == 1
+    assert list(parsed.keywords).count("file") == 1  # Stemmed: files → file
     assert len(parsed.keywords) <= 8
 
 
@@ -244,3 +244,71 @@ def test_camelcase_mixed_acronyms():
     parsed = _parse("where is MyAPIKey")
     assert "api" in parsed.keywords
     assert "key" in parsed.keywords
+
+
+# ---------- Session 20: selection-aware search fixes ------------------------
+
+def test_deictic_this_used_with_selection_promotes_to_references():
+    """'Where is this used' + selected symbol → references, not fuzzy.
+
+    Gap 1: The selection IS the thing the user is asking about.  'this'
+    with a selection means 'find references to what I selected.'
+    """
+    parsed = _parse(
+        "where is this database table used",
+        selection="users = Table('users', ...)",
+    )
+    assert parsed.intent == "references"
+    assert parsed.symbol == "users"
+    assert parsed.confidence >= 0.85
+
+
+def test_deictic_that_used_without_selection_stays_fuzzy():
+    """Without a selection, 'that' can't be grounded — stays fuzzy."""
+    parsed = _parse("where is that database table used")
+    assert parsed.intent == "fuzzy"
+
+
+def test_selection_symbol_injected_into_fuzzy_keywords():
+    """Gap 2: When fuzzy with a selected symbol, the symbol should be the
+    first keyword so it gets searched first."""
+    parsed = _parse(
+        "what does this do exactly",
+        selection="def authenticate_user(token): pass",
+    )
+    assert parsed.intent == "fuzzy"
+    assert parsed.symbol == "authenticate_user"
+    # Symbol should be injected as the first keyword.
+    assert parsed.keywords[0] == "authenticate_user"
+
+
+def test_used_no_longer_a_stopword():
+    """Gap 3: 'used' was a stopword — it's now preserved as a keyword."""
+    parsed = _parse("where is this function used")
+    assert "used" in parsed.keywords
+
+
+def test_uses_no_longer_a_stopword():
+    """'uses' should survive keyword extraction."""
+    parsed = _parse("who uses this class")
+    assert "uses" in parsed.keywords
+
+
+def test_existing_references_still_works():
+    """Regression: existing 'where else' references must still fire."""
+    parsed = _parse(
+        "where else is get_ability used",
+        selection="def get_ability(self): pass",
+    )
+    assert parsed.intent == "references"
+    assert parsed.symbol == "get_ability"
+
+
+def test_deictic_it_called_promotes_to_references():
+    """'Where is it called' + selection → references."""
+    parsed = _parse(
+        "where is it called from",
+        selection="def helper(): pass",
+    )
+    assert parsed.intent == "references"
+    assert parsed.symbol == "helper"

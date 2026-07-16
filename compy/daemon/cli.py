@@ -81,6 +81,20 @@ def main(argv: list[str] | None = None) -> int:
 
     historian = GitHistory()
 
+    # Streaming callback: emit intermediate grep candidates before ranking.
+    # The overlay reads this as the first JSON line and shows dimmed results
+    # immediately while the reasoner processes (saving 2-5s of perceived latency).
+    def _stream_candidates(candidates: "tuple[GrepHit, ...]") -> None:
+        if not request.stream or not candidates:
+            return
+        hits = [{
+            "file": h.file, "line": h.line, "snippet": h.snippet,
+            "score": 0.0, "source": "grep",
+        } for h in candidates]
+        print(json.dumps({
+            "stream": "candidates", "hits": hits, "count": len(candidates),
+        }), flush=True)
+
     result = run_pipeline(
         request,
         parser=RuleBasedParser(),
@@ -88,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         reasoners=reasoners,
         grapher=grapher,
         historian=historian,
+        on_candidates=_stream_candidates,
     )
     print(to_json(result))
     return 0

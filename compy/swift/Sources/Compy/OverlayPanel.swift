@@ -206,7 +206,7 @@ final class CompAppDelegate: NSObject, NSApplicationDelegate {
 final class OverlayController: NSObject, NSWindowDelegate {
     static let shared = OverlayController()
     private var panel: CompyPanel?
-    private let state = OverlayState()
+    let state = OverlayState()
 
     func show(
         selectedText: String? = nil,
@@ -292,18 +292,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: NSWindowDelegate — click-outside dismiss
+    // MARK: NSWindowDelegate — blur handling
 
     func windowDidResignKey(_ notification: Notification) {
-        // Session memory: only dismiss on click-outside when the overlay is idle
-        // or in a terminal state that doesn't warrant keeping open.
-        // When results are showing or degraded, the user may click back into the
-        // overlay to continue the session — don't close on them.
-        if state.phase == .empty || state.phase == .noMatch || state.phase == .processing {
-            hide()
-        }
-        // .results and .degraded: panel loses key but stays open.
-        // The user can click back into it to type a follow-up question.
+        // Don't hide on blur — Compy stays pinned until Esc or X button.
+        // hidesOnDeactivate is set to false so the panel remains visible
+        // even when focus returns to the editor.
+        // The user explicitly wants: "Clicking off (blur) of the overlay
+        // should not remove the search or stop Compy."
     }
 
     private func alignTopRight(_ panel: CompyPanel) {
@@ -355,6 +351,17 @@ final class OverlayState: ObservableObject {
     /// No-match hint — picked from pool each time no-match shows.
     @Published var noMatchHint: String = ""
 
+    /// Smart suggestions from daemon on no-match (synonyms, selection hints).
+    @Published var noMatchSuggestions: [String]? = nil
+    /// Brief toast message shown in the input bar after commands like /workspace.
+    @Published var toastMessage: String? = nil
+
+    /// The last-submitted query — captured so the session-export HTML can show
+    /// what was actually searched for (state.text is cleared after submit).
+    var lastQuestion: String = ""
+    /// True when the companion extension is writing fresh envelopes.
+    /// Set by HotkeyManager when it reads a fresh envelope file.
+    var extensionConnected: Bool = false
     var selectionText: String = ""
     var selectionFile: String? = nil
     var selectionLine: Int? = nil
@@ -386,8 +393,17 @@ final class OverlayState: ObservableObject {
     /// Non-nil while eyes are darting — a complete face override.
     @Published var eyeDart: String? = nil
 
-    /// The face the user sees — blink/wink/dart layered on top of baseFace.
+    /// Click reaction — a playful face shown briefly when user taps Compy.
+    /// Takes priority over blink/wink/dart. Cleared after ~0.8s.
+    @Published var reactionFace: String? = nil
+
+    /// Idle mood — cycles through subtle expression variations during .empty.
+    /// Separated from baseFace so morph transitions work between moods.
+    @Published var idleMood: String = ">-<"
+
+    /// The face the user sees — blink/wink/dart/reaction layered on top of baseFace.
     var displayedFace: String {
+        if let reaction = reactionFace { return reaction }
         if isBlinking { return blinkVariant() }
         if isWinking { return winkRightSide ? ">-;" : ";-<" }
         if let dart = eyeDart { return dart }
@@ -413,6 +429,8 @@ final class OverlayState: ObservableObject {
         case ">-o<": return "--o-"   // grep/stub tier
         case ">O<": return "-O-"    // graph tier
         case ">*<": return "-*-"    // git tier
+        case ">v<": return "-v-"    // dead code
+        case ">~<": return "-~-"    // convention/smug
         default: return baseFace
         }
     }
@@ -427,7 +445,8 @@ final class OverlayState: ObservableObject {
     }
 
     /// Subtle idle animation variants — Compy looks around naturally.
-    /// Triggered every 8-12s on a separate timer during .empty phase.
+    /// Triggered every 5-14s during .empty phase with varied glance durations.
+    /// Session 20: more varied glances + occasional double-take + longer holds.
     private var idleShiftTimer: Timer?
 
     func startIdleShifts() {
@@ -435,19 +454,98 @@ final class OverlayState: ObservableObject {
     }
 
     private func scheduleIdleShift() {
-        let interval = TimeInterval.random(in: 8...12)
+        let interval = TimeInterval.random(in: 5...14)
         idleShiftTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             guard let self = self, self.phase == .empty else { return }
-            // Quick eye dart — Compy glances around.
-            let glances = ["<.<", ">.>", ">_>"]
-            let glance = glances.randomElement()!
-            let holdDuration = 0.2
-            self.eyeDart = glance
-            DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
-                self?.eyeDart = nil
+            // Varied idle behaviors — like a real living thing:
+            //  - 35% quick glance (150-300ms): subtle eye dart
+            //  - 25% long look (400-800ms): Compy stares at something
+            //  - 10% double-take: glance → return → glance again
+            //  - 15% mood shift: subtle expression change (bored, curious, etc.)
+            //  - 10% micro-expression: involuntary emotional flash (70-120ms)
+            //  - 5% slow blink: a relaxed, content blink
+            let roll = Double.random(in: 0...1)
+            if roll < 0.05 {
+                self.performBlink()  // slow content blink
+            } else if roll < 0.15 {
+                self.performMicroExpression()  // involuntary twitch
+            } else if roll < 0.30 {
+                self.performMoodShift()  // subtle expression change
+            } else if roll < 0.40 {
+                self.performDoubleTake()
+            } else if roll < 0.65 {
+                self.performLongLook()
+            } else {
+                self.performQuickGlance()
             }
             self.scheduleIdleShift()
         }
+    }
+
+    /// Quick subtle glance — Compy's eyes flick to one side briefly.
+    private func performQuickGlance() {
+        let glances = ["<.<", ">.>", ">_>", "<_<", "o.o", "-'-"]
+        let glance = glances.randomElement()!
+        let holdDuration = TimeInterval.random(in: 0.15...0.30)
+        withAnimation(.easeInOut(duration: 0.06)) { eyeDart = glance }
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
+            withAnimation(.easeOut(duration: 0.08)) { self?.eyeDart = nil }
+        }
+    }
+
+    /// Longer stare — Compy fixes gaze on something for a beat.
+    private func performLongLook() {
+        let glances = ["O.O", "<.<", ">.>", ">_>"]
+        let glance = glances.randomElement()!
+        let holdDuration = TimeInterval.random(in: 0.40...0.80)
+        withAnimation(.easeInOut(duration: 0.10)) { eyeDart = glance }
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
+            withAnimation(.easeOut(duration: 0.15)) { self?.eyeDart = nil }
+        }
+    }
+
+    /// Double-take: glance → return → glance again.
+    private func performDoubleTake() {
+        let glances = ["<.<", ">.>", "O.O"]
+        let first = glances.randomElement()!
+        withAnimation(.easeInOut(duration: 0.06)) { eyeDart = first }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) { [weak self] in
+            withAnimation(.easeOut(duration: 0.05)) { self?.eyeDart = nil }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in
+                let second = glances.randomElement()!
+                withAnimation(.easeInOut(duration: 0.06)) { self?.eyeDart = second }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+                    withAnimation(.easeOut(duration: 0.08)) { self?.eyeDart = nil }
+                }
+            }
+        }
+    }
+
+    /// Micro-expression: a brief emotional flash (70-120ms).
+    /// Simulates an involuntary twitch, realization, or tiny reaction.
+    /// Token-based invalidation prevents the flash from reappearing after
+    /// a concurrent blink finishes (which takes priority in displayedFace).
+    private var microExpressionToken: Int = 0
+
+    private func performMicroExpression() {
+        let flashes = [">_<", "o_o", ">*<", ">,<", "O_O", ">w<"]
+        let flash = flashes.randomElement()!
+        let token = microExpressionToken + 1
+        microExpressionToken = token
+        withAnimation(.easeInOut(duration: 0.04)) { eyeDart = flash }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int.random(in: 70...120))) { [weak self] in
+            guard let self = self, self.microExpressionToken == token else { return }
+            withAnimation(.easeOut(duration: 0.06)) { self.eyeDart = nil }
+        }
+    }
+
+    /// Mood shift: smoothly transition to a different idle expression.
+    /// Cycles through subtle mood variations so Compy doesn't just stare blankly.
+    private func performMoodShift() {
+        let moods = [">-<", ">~<", ">v<", ">.<", ">°°<", ">u<"]
+        let next = moods.filter { $0 != idleMood }.randomElement() ?? ">-<"
+        idleMood = next
+        maybeTransitionFace()
     }
 
     func stopIdleShifts() {
@@ -465,17 +563,78 @@ final class OverlayState: ObservableObject {
     /// Gentle vertical float offset for idle animation.
     @Published var faceFloatOffset: CGFloat = 0
 
+    /// Last query's parsed intent — set when daemon returns results.
+    var lastIntent: String = ""
+
+    /// Captured client-side intent guess at submit time — frozen before text clears.
+    /// The computed `guessedIntent` reads `text` which is empty during processing.
+    var submittedIntentGuess: String = "fuzzy"
+
+    /// Quick client-side intent guess from question text + selection.
+    /// Used only at submit time to freeze `submittedIntentGuess`.
+    /// An approximation of what the parser will determine — the real intent
+    /// arrives with the daemon result and is stored in `lastIntent`.
+    func captureIntentGuess() -> String {
+        let q = text.lowercased()
+        if !selectionText.isEmpty {
+            if q.contains("where") || q.contains("find") || q.contains("show") { return "references" }
+            if q.contains("why") || q.contains("who") { return "history" }
+            return "references"
+        }
+        if q.contains("how does") || q.contains("explain") || q.contains("overview") { return "overview" }
+        if q.contains("why") || q.contains("who added") || q.contains("blame") { return "history" }
+        if q.contains("calls") || q.contains("depends") || q.contains("imports") { return "relational" }
+        return "fuzzy"
+    }
+
     /// The intended face for the current pipeline phase (without flicker protection).
-    /// Tier-of-origin: when results come from heuristic/stub/grep instead of ollama/freebuff,
-    /// the face shows a subtle eye-state difference — addressing Claude's risk #1 that
-    /// cascading fallback hides which tier answered with what confidence.
+    /// Processing face uses client-side intent guess; results face blends
+    /// backend tier with actual parsed intent.
     var intendedFace: String {
         switch phase {
-        case .empty: return ">-<"
-        case .processing: return selectionText.isEmpty ? ">•_•<" : ">.>"
-        case .results: return tierResultsFace
+        case .empty: return idleMood
+        case .processing: return intentProcessingFace
+        case .results: return intentResultsFace
         case .noMatch: return ">!?<"
         case .degraded: return ">x_<"
+        }
+    }
+
+    /// Processing face reflects what kind of search Compy THINKS it's doing.
+    /// Uses captured guess frozen at submit time — text is empty during processing.
+    private var intentProcessingFace: String {
+        switch submittedIntentGuess {
+        case "references", "definition": return ">.>"      // targeted lookup
+        case "overview": return ">O<"                       // structural digest
+        case "relational", "blast_radius": return ">O<"     // graph query
+        case "history", "rationale": return ">*<"           // git archaeology
+        default: return ">•_•<"                              // broad fuzzy search
+        }
+    }
+
+    /// Results face blends backend tier (which answered) with intent (what was asked).
+    /// Intent shapes the eyes; tier shapes the mouth/confidence markers.
+    private var intentResultsFace: String {
+        let intent = lastIntent.isEmpty ? "fuzzy" : lastIntent
+        switch intent {
+        case "references", "definition":
+            return tierResultsFace  // already well-calibrated for find results
+        case "overview":
+            return ">O<"            // structural — always confident
+        case "relational", "blast_radius":
+            return ">O<"            // graph-derived
+        case "history", "rationale":
+            return ">*<"            // historical/git source
+        case "trace":
+            return ">o<"            // exact match — confident
+        case "fuzzy":
+            return tierResultsFace  // source-tier face: ollama >o<, heuristic >°°<, etc.
+        case "dead_code":
+            return ">v<"            // looking down — cleanup/suspicious
+        // convention/dedup demoted to fuzzy in orchestrator — reserved faces:
+        // case "convention", "dedup": return ">~<"
+        default:
+            return tierResultsFace
         }
     }
 
@@ -581,19 +740,26 @@ final class OverlayState: ObservableObject {
     }
 
     /// Guard against double-bounce from rapid successive transitions.
-    private var faceTransitioning = false
+    /// fileprivate so OverlayView can check it in triggerClickReaction.
+    fileprivate var faceTransitioning = false
 
     // MARK: - Blink & Dart Timers
 
-    /// Start periodic blinking: every 3-5 seconds, eyes close for 80ms.
+    /// Start periodic blinking: every 2-6 seconds (mix of short and long intervals),
+    /// eyes close over 30ms, hold 40ms, open over 50ms for organic feel.
     /// 15% chance to wink instead of full blink.
+    /// ~5% chance of double-blink (two rapid blinks in succession).
     func startBlinkTimer() {
         stopBlinkTimer()
         scheduleNextBlink()
     }
 
     private func scheduleNextBlink() {
-        let interval = TimeInterval.random(in: 3...5)
+        // Mix of short (2-4s) and long (5-8s) intervals for natural rhythm.
+        let isLongPause = Double.random(in: 0...1) < 0.30
+        let interval: TimeInterval = isLongPause
+            ? TimeInterval.random(in: 5...8)
+            : TimeInterval.random(in: 2...4)
         blinkTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             self.fireBlink()
@@ -605,19 +771,41 @@ final class OverlayState: ObservableObject {
         guard !faceTransitioning else { scheduleNextBlink(); return }
         // 15% chance to wink instead of full blink.
         if Double.random(in: 0...1) < 0.15 {
-            isWinking = true
-            winkRightSide = Bool.random()
+            performWink()
         } else {
-            isBlinking = true
+            performBlink()
         }
-        // Eyes open after 80ms.
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in
-            guard let self = self else { return }
-            self.isBlinking = false
-            self.isWinking = false
+        // ~5% chance of double-blink: rapid second blink after 120ms.
+        if Double.random(in: 0...1) < 0.05 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) { [weak self] in
+                guard let self = self, !self.faceTransitioning else { return }
+                self.performBlink()
+            }
         }
         // Schedule the next blink.
         scheduleNextBlink()
+    }
+
+    /// Organic three-phase blink: close → hold → open.
+    private func performBlink() {
+        // Phase 1: close over 30ms
+        withAnimation(.easeIn(duration: 0.03)) { isBlinking = true }
+        // Phase 2: hold closed 40ms
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
+            guard let self = self else { return }
+            // Phase 3: open over 50ms
+            withAnimation(.easeOut(duration: 0.05)) { self.isBlinking = false }
+        }
+    }
+
+    /// Wink: one eye closes with same organic timing.
+    private func performWink() {
+        winkRightSide = Bool.random()
+        withAnimation(.easeIn(duration: 0.03)) { isWinking = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(70)) { [weak self] in
+            guard let self = self else { return }
+            withAnimation(.easeOut(duration: 0.05)) { self.isWinking = false }
+        }
     }
 
     func stopBlinkTimer() {
@@ -704,16 +892,21 @@ final class OverlayState: ObservableObject {
         isWinking = false
         winkRightSide = false
         eyeDart = nil
+        reactionFace = nil  // clear click reaction
         faceScale = 1.0
         faceOpacity = 1.0
         faceFloatOffset = 0
+        idleMood = ">-<"  // reset idle mood
         faceShownAt = Date.distantPast
         faceTransitioning = false
         stopBlinkTimer()
         stopDartTimer()
         stopIdleShifts()
+        noMatchSuggestions = nil
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
+        noMatchSuggestions = nil
+        toastMessage = nil
     }
 
     /// Kill the whisper.cpp subprocess if running.
@@ -812,8 +1005,10 @@ struct OverlayView: View {
     // MARK: - Input Bar
 
     /// ASCII face-state mascot — lives top-left, near the macOS close button.
-    /// Hidden during processing/results since the face appears in the content area.
-    /// Visible during .empty and .noMatch phases as a corner badge.
+    /// Shows during .empty and .noMatch phases (the "no results" states).
+    /// Hidden during .processing and .results/.degraded — the face moves to the
+    /// content area for those phases.
+    /// Per clarifications.md: ONE face at a time — either corner or content area.
     @ViewBuilder
     private var compyFace: some View {
         if state.phase == .empty || state.phase == .noMatch {
@@ -825,12 +1020,36 @@ struct OverlayView: View {
     }
 
     /// Reusable face view — size-scalable for different contexts (corner, empty state, results).
+    /// Tapping Compy triggers a playful reaction — surprised face + bounce.
     private func faceView(size: CGFloat) -> some View {
         Text(state.displayedFace)
             .font(.system(size: size, weight: .medium, design: .monospaced))
             .foregroundColor(state.faceColor)
             .scaleEffect(state.faceScale)
             .opacity(state.faceOpacity)
+            .onTapGesture {
+                triggerClickReaction()
+            }
+    }
+
+    /// Playful reaction when Compy is clicked — like poking a pet.
+    private func triggerClickReaction() {
+        // Don't react during processing (already animating) or during a morph transition
+        // (the click's scale bounce would fight the morph's dissolve).
+        guard state.phase != .processing else { return }
+        guard !state.faceTransitioning else { return }
+        let reactions = ["^o^", ">w<", ">3<", "O_O", ">_<", "*o*"]
+        let reaction = reactions.randomElement()!
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
+            state.reactionFace = reaction
+            state.faceScale = 1.25
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak state] in
+            withAnimation(.easeOut(duration: 0.3)) {
+                state?.reactionFace = nil
+                state?.faceScale = 1.0
+            }
+        }
     }
 
     // MARK: - Input Bar
@@ -885,6 +1104,58 @@ struct OverlayView: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+            }
+
+            // Streaming indicator — compact progress badge during the ranking phase.
+            // Shows while the daemon is running the reasoner on streamed candidates.
+            if inputBarIsStreaming && inputBarStreamCount > 0 {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.55)
+                        .frame(width: 10, height: 10)
+                    Text("Ranking \(inputBarStreamCount)…")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.blue)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.blue.opacity(0.08))
+                .cornerRadius(4)
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            }
+
+            // Extension + workspace indicator — shows connection status and project.
+            // Green dot = extension is writing fresh envelopes.
+            // Gray dot = using AX fallback (extension not detected).
+            if let toast = state.toastMessage {
+                HStack(spacing: 4) {
+                    Text(toast)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(toast.hasPrefix("✓") ? .green : .orange)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(toast.hasPrefix("✓") ? Color.green.opacity(0.08) : Color.orange.opacity(0.08))
+                .cornerRadius(4)
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            } else if let root = state.workspaceRoot, !root.isEmpty {
+                let name = URL(fileURLWithPath: root).lastPathComponent
+                let hasExtension = state.extensionConnected
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(hasExtension ? Color.green : Color.gray)
+                        .frame(width: 6, height: 6)
+                    Text("in \(name)/")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color(NSColor.quaternaryLabelColor))
+                .cornerRadius(4)
+                .help(hasExtension
+                    ? "Extension connected · searching \(root)"
+                    : "Extension not detected · using \(root)")
             }
         }
         .padding(.horizontal, 18)
@@ -1149,12 +1420,9 @@ struct OverlayView: View {
 
     private var emptyState: some View {
         VStack(spacing: 14) {
-            // Compy face center-stage — large, the focal point of the overlay.
-            faceView(size: 48)
-                .offset(y: state.faceFloatOffset)
-                .onAppear { state.startIdleFloat() }
-                .onDisappear { state.stopIdleFloat() }
-
+            // No face here — the corner badge in the ZStack overlay is the sole face.
+            // Per clarifications.md: ONE face at a time, not doubling.
+            
             HStack(spacing: 6) {
                 Text("Press").foregroundColor(.secondary)
                 HStack(spacing: 2) {
@@ -1171,24 +1439,31 @@ struct OverlayView: View {
             }
             .font(.system(size: 13))
 
-            Text("Esc or click outside to dismiss")
+            Text("Esc or X to dismiss")
                 .font(.system(size: 11))
                 .foregroundColor(Color(NSColor.tertiaryLabelColor))
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { state.startIdleFloat() }
+        .onDisappear { state.stopIdleFloat() }
     }
 
     // MARK: - Processing State
 
-    /// Randomized message pool — shuffles categories each search for variety.
-    private var progressMessages: [String] {
+    /// Build a fresh shuffled progress-message sequence.
+    /// Called once when processing starts so the typing animation stays stable
+    /// across re-renders triggered by blink/wink/@Published state changes.
+    private static func buildProgressMessages() -> [String] {
         let intros = [
             "Scanning the codebase…",
             "Reading through files…",
             "Exploring the repo…",
             "Gathering context…",
             "Looking around…",
+            "Taking a peek…",
+            "Let me check…",
+            "On the hunt…",
         ].shuffled()
         let mids = [
             "Consulting the graph…",
@@ -1199,23 +1474,41 @@ struct OverlayView: View {
             "Following the trail…",
             "Connecting the dots…",
             "Mapping dependencies…",
+            "Reading call sites…",
+            "Indexing matches…",
+            "Checking git history…",
+            "Sorting by relevance…",
         ].shuffled()
         let outros = [
             "Ranking results…",
             "Polishing…",
             "Almost there…",
+            "Just a moment…",
+            "Finishing up…",
+            "Wrapping up…",
         ].shuffled()
-        return [intros[0], intros[1], mids[0], mids[1], mids[2], outros[0]]
+        // Rare personality quip (~10% chance) sprinkled in mid-sequence.
+        let personality = [
+            "Hmm, I know this one…",
+            "Oh, interesting…",
+            "Let me think…",
+        ]
+        var msgs = [intros[0], intros[1], mids[0], mids[1], mids[2], outros[0]]
+        if Double.random(in: 0...1) < 0.10 {
+            msgs.insert(personality.randomElement()!, at: msgs.count / 2)
+        }
+        return msgs
     }
 
     private var processingState: some View {
         VStack(spacing: 0) {
-            // Compy face — present during search, morphs to thinking expression.
+            // Compy face — the focal point during search.
+            // Per clarifications.md: ONE face at a time — this replaces the corner badge.
             faceView(size: 28)
                 .padding(.top, 20)
                 .padding(.bottom, 8)
-
-            TypingProgressView(messages: progressMessages)
+            
+            TypingProgressView(messages: currentProgressMessages)
                 .frame(maxWidth: .infinity)
 
             // Show previous results dimmed — session memory across queries.
@@ -1249,21 +1542,39 @@ struct OverlayView: View {
 
     private var noMatchState: some View {
         VStack(spacing: 10) {
-            // Compy looking confused.
-            faceView(size: 36)
-                .padding(.bottom, 4)
-
+            // No face here — the corner badge in the ZStack overlay is the sole face.
+            // Per clarifications.md: ONE face at a time, not doubling.
+            
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 26, weight: .light))
                 .foregroundColor(.secondary)
             Text("No results")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.primary)
-            Text(state.noMatchHint)
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+            // Smart suggestions from daemon (synonyms, selection hints) —
+            // contextual and specific, replaces static hint pool when available.
+            if let suggestions = state.noMatchSuggestions, !suggestions.isEmpty {
+                ForEach(suggestions, id: \.self) { suggestion in
+                    HStack(spacing: 4) {
+                        Image(systemName: "lightbulb")
+                            .font(.system(size: 10))
+                            .foregroundColor(.yellow)
+                        Text(suggestion)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Color.yellow.opacity(0.08))
+                    .cornerRadius(6)
+                }
+            } else {
+                Text(state.noMatchHint)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
             Text("Esc to dismiss  ·  Type a new query to try again")
                 .font(.system(size: 11))
                 .foregroundColor(Color(NSColor.tertiaryLabelColor))
@@ -1279,6 +1590,13 @@ struct OverlayView: View {
             if state.phase == .degraded {
                 degradedBanner
             }
+
+            // Compy face — prominent, the focal point of results.
+            // Per clarifications.md: "either top left (no results) or in the search results."
+            // This is the "in the search results" placement — large and visible.
+            faceView(size: 28)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
 
             // Result count + source badge
             resultHeader
@@ -1296,15 +1614,29 @@ struct OverlayView: View {
 
     // MARK: - Result Header
 
+    /// True while the header still shows the "Ranking N candidates…" streaming message.
+    /// Flips to false when final results arrive, triggering the source badge fade-in
+    /// and the count transition.
+    @State private var headerIsRanking = false
+
+    /// True while the daemon is streaming intermediate grep candidates.
+    /// Drives the compact "Ranking N candidates…" indicator in the input bar.
+    @State private var inputBarIsStreaming = false
+    /// Number of streamed candidates — shown in the input bar indicator.
+    @State private var inputBarStreamCount = 0
+
+    /// Stable shuffled progress messages — generated once when processing starts.
+    /// Previously a computed property that called .shuffled() on every render,
+    /// causing the typing animation to jump to random messages whenever any
+    /// @Published state change triggered a re-render (e.g. isBlinking toggling).
+    @State private var currentProgressMessages: [String] = []
+
     private var resultHeader: some View {
         HStack {
-            // Compy face — small, satisfied expression when results found.
-            faceView(size: 16)
-                .padding(.trailing, 2)
-
             Text(resultHeaderCopy)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.secondary)
+                .contentTransition(.opacity)
 
             Spacer()
 
@@ -1317,17 +1649,38 @@ struct OverlayView: View {
             .buttonStyle(.plain)
             .help("Copy all results as formatted text")
 
-            Text(state.sourceLabel.capitalized)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(sourceBadgeColor)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(sourceBadgeColor.opacity(0.12))
-                .cornerRadius(4)
+            // Export session as animated HTML — shareable clip with Compy's personality.
+            Button(action: exportSessionAsHTML) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Export animated session clip as HTML")
+
+            // Source badge — fades in when ranking completes.
+            // Hidden during the "Ranking N candidates…" streaming phase.
+            if !headerIsRanking && !state.sourceLabel.isEmpty {
+                Text(state.sourceLabel.capitalized)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(sourceBadgeColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(sourceBadgeColor.opacity(0.12))
+                    .cornerRadius(4)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 4)
+        .animation(.easeInOut(duration: 0.35), value: headerIsRanking)
+        .onChange(of: state.resultHeaderText) { _, newValue in
+            // Detect the header phase by checking for the streaming prefix.
+            // The daemon sets "Ranking N candidates…" during intermediate phase;
+            // the final handler either sets a personality header or clears it.
+            headerIsRanking = newValue.hasPrefix("Ranking ")
+        }
     }
 
     private var copyIcon: String {
@@ -1347,6 +1700,212 @@ struct OverlayView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             didCopy = false
         }
+    }
+
+    /// Export the current session as a self-contained HTML file with CSS animations.
+    /// Replays the query, Compy's face, and staggered results — a shareable clip
+    /// that captures the "wow" moment (speed + personality together).
+    private func exportSessionAsHTML() {
+        let html = generateSessionHTML()
+        let fileName = "compy-session-\(Int(Date().timeIntervalSince1970)).html"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try? html.write(to: url, atomically: true, encoding: .utf8)
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Build a self-contained HTML document that replays the current session.
+    /// Includes Compy's face, the query, staggered results, source badge, and
+    /// CSS keyframe animations that mirror the native SwiftUI stagger + morph.
+    private func generateSessionHTML() -> String {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let n = state.results.count
+        let sourceLabel = state.sourceLabel.capitalized
+        let escapedFace = state.displayedFace
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let queryText = state.lastQuestion.isEmpty ? "Search codebase..." : state.lastQuestion
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+        let titleQuery = state.lastQuestion.prefix(60)
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+
+        // Build result rows with staggered animation delays.
+        var resultRows = ""
+        for (i, hit) in state.results.enumerated() {
+            let delay = Double(i) * 0.04
+            let scorePct = Int(hit.score * 100)
+            let escapedFile = hit.file
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+            let escapedSource = hit.source
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+            let escapedSnippet = hit.snippet
+                .replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let ctxBadge: String
+            if let ctx = hit.structuralContext, !ctx.isEmpty {
+                let escapedCtx = ctx
+                    .replacingOccurrences(of: "&", with: "&amp;")
+                    .replacingOccurrences(of: "<", with: "&lt;")
+                    .replacingOccurrences(of: ">", with: "&gt;")
+                ctxBadge = "<span class='struct-badge'>\(escapedCtx)</span>"
+            } else {
+                ctxBadge = ""
+            }
+            let scoreClass = scorePct >= 90 ? "score-high" : (scorePct >= 60 ? "score-mid" : "score-low")
+            resultRows += """
+            <div class="result-row" style="animation-delay: \(delay)s">
+              <div class="result-header">
+                <span class="file-line">\(escapedFile):\(hit.line)</span>
+                <span class="result-source">via \(escapedSource)</span>
+                <span class="result-score \(scoreClass)">\(scorePct)%</span>
+              </div>
+              <div class="result-snippet">\(escapedSnippet)</div>
+              \(ctxBadge)
+            </div>
+            """
+        }
+
+        return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Compy: \(titleQuery)</title>
+        <style>
+          :root {
+            --bg: #1e1e2e;
+            --surface: #2a2a3c;
+            --text: #cdd6f4;
+            --muted: #6c7086;
+            --accent: #89b4fa;
+            --green: #a6e3a1;
+            --orange: #fab387;
+            --snippet-bg: #181825;
+          }
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'SF Mono', Menlo, monospace;
+            background: var(--bg); color: var(--text);
+            display: flex; justify-content: center; align-items: flex-start;
+            min-height: 100vh; padding: 40px 16px;
+          }
+          .overlay {
+            width: 600px; max-width: 100%;
+            background: var(--surface);
+            border-radius: 12px; overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+          }
+          .input-bar {
+            display: flex; align-items: center; gap: 8px;
+            padding: 16px 18px;
+            background: var(--snippet-bg);
+            position: relative;
+          }
+          .face {
+            font-family: 'SF Mono', Menlo, monospace;
+            font-size: 16px; font-weight: 500;
+            animation: facePulse 2s ease-in-out infinite;
+          }
+          @keyframes facePulse {
+            0%, 100% { opacity: 1; transform: translateY(0); }
+            50% { opacity: 0.7; transform: translateY(-2px); }
+          }
+          .query-text {
+            font-size: 18px; color: var(--text);
+            overflow: hidden; white-space: nowrap;
+            animation: typing 1.2s steps(40, end);
+          }
+          @keyframes typing {
+            from { width: 0; }
+            to { width: 100%; }
+          }
+          .results-area { padding: 12px; }
+          .results-header {
+            display: flex; align-items: center; gap: 8px;
+            padding: 4px 4px 8px;
+            font-size: 12px; font-weight: 500; color: var(--muted);
+          }
+          .source-badge {
+            font-size: 11px; font-weight: 600;
+            padding: 2px 7px; border-radius: 4px;
+            margin-left: auto;
+            background: rgba(137,180,250,0.12); color: var(--accent);
+          }
+          .result-row {
+            padding: 8px; margin-bottom: 4px;
+            border-radius: 6px;
+            animation: slideUp 0.35s ease-out forwards;
+            opacity: 0;
+          }
+          .result-row:hover { background: rgba(255,255,255,0.04); }
+          @keyframes slideUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .result-header {
+            display: flex; align-items: baseline; gap: 8px;
+            margin-bottom: 6px;
+          }
+          .file-line { font-size: 13px; font-weight: 600; color: var(--text); }
+          .result-source { font-size: 10px; color: var(--muted); margin-left: auto; }
+          .result-score { font-size: 11px; font-weight: 500; }
+          .score-high { color: var(--green); }
+          .score-mid { color: var(--orange); }
+          .score-low { color: var(--muted); }
+          .result-snippet {
+            font-size: 12px; font-family: 'SF Mono', Menlo, monospace;
+            color: var(--muted); background: var(--snippet-bg);
+            padding: 6px; border-radius: 4px;
+            white-space: pre-wrap; word-break: break-all;
+          }
+          .struct-badge {
+            display: inline-block; margin-top: 4px;
+            font-size: 10px; font-weight: 500;
+            color: #a0a0b8; background: rgba(255,255,255,0.04);
+            padding: 2px 6px; border-radius: 3px;
+          }
+          .footer {
+            text-align: center; padding: 16px;
+            font-size: 11px; color: var(--muted);
+            border-top: 1px solid rgba(255,255,255,0.05);
+          }
+          .footer a { color: var(--accent); text-decoration: none; }
+        </style>
+        </head>
+        <body>
+        <div class="overlay">
+          <div class="input-bar">
+            <span class="face">\(escapedFace)</span>
+            <span class="query-text">\(queryText)</span>
+          </div>
+          <div class="results-area">
+            <div class="results-header">
+              \(escapedFace)
+              \(n) result\(n == 1 ? "" : "s")
+              <span class="source-badge">\(sourceLabel)</span>
+            </div>
+            \(resultRows)
+          </div>
+          <div class="footer">
+            Compy Session · \(now) · <a href="https://github.com">Compy</a>
+          </div>
+        </div>
+        </body>
+        </html>
+        """
     }
 
     /// 80% standard count, 20% personality phrasing.
@@ -1391,6 +1950,58 @@ struct OverlayView: View {
         .padding(.top, 12)
     }
 
+    /// Try to extract a workspace-switch directive from natural language.
+    /// Patterns: "find X in /path", "find X in garden_warriors/",
+    /// "search in ~/code/project for X".
+    /// Returns (query, path) on success, nil if no workspace directive detected.
+    private func tryNLWorkspaceSwitch(_ raw: String) -> (query: String, path: String)? {
+        let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+
+        // Pattern 1: "... in /absolute/path..." or "... in ~/path..."
+        // Must start with / or ~/ — avoids matching normal words.
+        let absRe = try? NSRegularExpression(
+            pattern: "\\bin\\s+((?:~/|/)[/\\w.+-]+)\\b", options: [.caseInsensitive]
+        )
+        // Pattern 2: "... in word-name/ ..." (relative dir, MUST end with /)
+        let relRe = try? NSRegularExpression(
+            pattern: "\\bin\\s+([\\w][\\w.-]*/)\\s*", options: [.caseInsensitive]
+        )
+
+        // Try absolute first (more reliable).
+        for (re, isRel) in [(absRe, false), (relRe, true)] {
+            guard let regex = re else { continue }
+            guard let match = regex.firstMatch(in: raw, range: range),
+                  match.numberOfRanges >= 2,
+                  let pathRange = Range(match.range(at: 1), in: raw) else { continue }
+
+            var pathStr = String(raw[pathRange])
+            // Only strip trailing slash — preserving leading / for absolute paths.
+            if pathStr.hasSuffix("/") { pathStr.removeLast() }
+
+            let resolved: String
+            if isRel {
+                // Relative: resolve against parent of current workspace.
+                let parent = state.workspaceRoot.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path } ?? NSHomeDirectory()
+                resolved = URL(fileURLWithPath: pathStr, relativeTo: URL(fileURLWithPath: parent)).path
+            } else {
+                let expanded = (pathStr as NSString).expandingTildeInPath
+                resolved = expanded.hasPrefix("/") ? expanded : URL(fileURLWithPath: expanded, relativeTo: repoRoot).path
+            }
+
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDir), isDir.boolValue else { continue }
+
+            // Remove the "in <path>" clause from the query.
+            let clauseRange = Range(match.range(at: 0), in: raw)!
+            var query = raw
+            query.removeSubrange(clauseRange)
+            let cleaned = query.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            return (query: cleaned.isEmpty ? raw : cleaned, path: resolved)
+        }
+        return nil
+    }
+
     // MARK: - Haptics
 
     /// Light tap — query submitted.
@@ -1412,12 +2023,81 @@ struct OverlayView: View {
 
     private func submitQuery() {
         guard !state.text.isEmpty else { return }
-        guard state.phase != .processing else { return }  // prevent rapid-fire submits
+        guard state.phase != .processing else { return }
+
+        // ── Built-in commands ───────────────────────────────────
+        // /workspace <path> — switch the search directory.
+        if state.text.hasPrefix("/workspace ") {
+            let raw = state.text.dropFirst(11).trimmingCharacters(in: .whitespaces)
+            guard !raw.isEmpty else {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    state.toastMessage = "✗ Usage: /workspace ~/path/to/project"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    withAnimation(.easeOut(duration: 0.2)) { state.toastMessage = nil }
+                }
+                state.text = ""
+                return
+            }
+            let expanded = (raw as NSString).expandingTildeInPath
+            let path = expanded.hasPrefix("/") ? expanded : URL(fileURLWithPath: expanded, relativeTo: repoRoot).path
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    state.toastMessage = "✗ Not found: \(raw)"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    withAnimation(.easeOut(duration: 0.2)) { state.toastMessage = nil }
+                }
+                state.text = ""
+                return
+            }
+            state.workspaceRoot = path
+            state.selectionFile = nil
+            state.selectionLine = nil
+            state.selectionText = ""
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            withAnimation(.easeOut(duration: 0.15)) {
+                state.text = ""
+                state.toastMessage = "✓ Now searching: \(name)/"
+            }
+            hapticSubmit()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                withAnimation(.easeOut(duration: 0.2)) { state.toastMessage = nil }
+            }
+            return
+        }
+
+        // ── Natural-language workspace switching ───────────────
+        // "find X in /path" or "search project-name for Y"
+        if let switched = tryNLWorkspaceSwitch(state.text) {
+            state.workspaceRoot = switched.path
+            state.selectionFile = nil
+            state.selectionLine = nil
+            state.selectionText = ""
+            let name = URL(fileURLWithPath: switched.path).lastPathComponent
+            withAnimation(.easeOut(duration: 0.15)) {
+                state.text = switched.query  // the query part without the workspace clause
+                state.toastMessage = "✓ Switched to: \(name)/"
+            }
+            hapticSubmit()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                withAnimation(.easeOut(duration: 0.2)) { state.toastMessage = nil }
+            }
+            return
+        }
+        // ────────────────────────────────────────────────────────
+
         let question = state.text
 
         hapticSubmit()
         state.stopIdleFloat()
         state.startProcessingPulse()
+
+        // Generate stable progress messages BEFORE the phase change so they're
+        // ready on the first .processing render — avoids a one-frame flash of
+        // the fallback "Working…" message.
+        currentProgressMessages = Self.buildProgressMessages()
 
         withAnimation(.easeOut(duration: 0.15)) {
             state.phase = .processing
@@ -1432,6 +2112,9 @@ struct OverlayView: View {
             state.resultHeaderText = ""
         }
 
+        // Freeze the intent guess before text is cleared — used by processing face.
+        state.submittedIntentGuess = state.captureIntentGuess()
+
         DispatchQueue.global(qos: .userInitiated).async {
             // Resolve the active workspace — the directory ripgrep searches.
             // Priority: extension workspaceRoot > derived from selection file > COMPY_ROOT.
@@ -1442,6 +2125,11 @@ struct OverlayView: View {
             )
             // Always send a Selection so the daemon receives the correct
             // workspace_root — even when no text/file was selected.
+            //
+            // Sync the workspace indicator so the user sees what was actually searched.
+            DispatchQueue.main.async {
+                state.workspaceRoot = activeWorkspace
+            }
             let sel = Selection(
                 text: state.selectionText,
                 file: state.selectionFile,
@@ -1449,7 +2137,7 @@ struct OverlayView: View {
                 workspaceRoot: activeWorkspace
             )
 
-            let request = QueryRequest(question: question, selection: sel)
+            let request = QueryRequest(question: question, selection: sel, stream: true)
             guard let jsonData = try? compyEncoder.encode(request) else {
                 _debugLog("FAIL: JSON encode failed for question='\(question)'")
                 DispatchQueue.main.async {
@@ -1477,6 +2165,7 @@ struct OverlayView: View {
             do {
                 let lock = NSLock()
                 var allOutput = Data()
+                var streamedCount: Int?
                 let done = DispatchSemaphore(value: 0)
                 stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                     let chunk = handle.availableData
@@ -1486,6 +2175,30 @@ struct OverlayView: View {
                     } else {
                         lock.lock()
                         allOutput.append(chunk)
+                        // Try to parse the first complete JSON line as stream event.
+                        if streamedCount == nil, let text = String(data: allOutput, encoding: .utf8) {
+                            if let nl = text.firstIndex(of: "\n") {
+                                let firstLine = String(text[..<nl])
+                                if let lineData = firstLine.data(using: .utf8),
+                                   let event = try? compyDecoder.decode(StreamEvent.self, from: lineData),
+                                   event.stream == "candidates" {
+                                    streamedCount = event.count
+                                    _debugLog("streamed \(event.count) candidates to overlay")
+                                    DispatchQueue.main.async {
+                                        // Haptic tap — immediate tactile feedback that candidates arrived.
+                                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                                        // Show dimmed grep candidates immediately while reasoner runs.
+                                        withAnimation(.easeOut(duration: 0.15)) {
+                                            state.results = event.hits
+                                            state.resultHeaderText = "Ranking \(event.count) candidates…"
+                                        }
+                                        // Drive the compact input-bar progress badge.
+                                        inputBarIsStreaming = true
+                                        inputBarStreamCount = event.count
+                                    }
+                                }
+                            }
+                        }
                         lock.unlock()
                     }
                 }
@@ -1505,6 +2218,11 @@ struct OverlayView: View {
 
                 _debugLog("daemon exit=\(exitCode) outBytes=\(outData.count) stderr=\(stderrStr)")
 
+                // Decode the last JSON line as the final QueryResult.
+                let text = String(data: outData, encoding: .utf8) ?? ""
+                let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                let finalData = lines.last?.data(using: .utf8) ?? outData
+
                 if exitCode != 0 {
                     let reason = stderrStr.isEmpty ? "daemon exit \(exitCode)" : "daemon: \(stderrStr)"
                     DispatchQueue.main.async {
@@ -1518,16 +2236,18 @@ struct OverlayView: View {
                     return
                 }
 
-                if let result = try? compyDecoder.decode(QueryResult.self, from: outData) {
+                if let result = try? compyDecoder.decode(QueryResult.self, from: finalData) {
                     DispatchQueue.main.async {
                         state.stopProcessingPulse()
+                        // Clear streaming indicators now that final results are here.
+                        inputBarIsStreaming = false
+                        inputBarStreamCount = 0
                         let n = result.hits.count
                         // 20% chance of personality-flavored result header
                         if n > 0 && CompyMessagePool.shouldUsePersonality() {
                             let template = CompyMessagePool.pick(from: CompyMessagePool.resultHeaders, category: "resultHeaders")
                             if template.contains("%@") {
                                 let source = state.sourceLabel.capitalized
-                                // Replace only the FIRST %@ (source name); keep %@ for plural "s".
                                 if let range = template.range(of: "%@") {
                                     let replaced = template.replacingCharacters(in: range, with: source)
                                     state.resultHeaderText = String(format: replaced, n, n == 1 ? "" : "s")
@@ -1538,7 +2258,9 @@ struct OverlayView: View {
                                 state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
                             }
                         }
+                        state.lastIntent = result.intent  // for intent-reflecting face
                         state.previousResults = []  // clear old results on success
+                        state.lastQuestion = question  // capture for session export
                         state.text = ""  // clear text so user can type follow-up immediately
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
@@ -1551,6 +2273,7 @@ struct OverlayView: View {
                         }
                         if result.hits.isEmpty {
                             hapticNoMatch()
+                            state.noMatchSuggestions = result.suggestions
                             state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
                         } else {
                             hapticSuccess()
@@ -1600,6 +2323,13 @@ struct ResultRow: View {
     let index: Int
     @State private var isHovered = false
     @State private var appeared = false
+    /// Shimmer sweep position — animates from -200 to 600 for dimmed intermediate rows.
+    @State private var shimmerOffset: CGFloat = -200
+    /// True once the shimmer animation has started.
+    @State private var shimmerStarted = false
+
+    /// Whether this row is an intermediate (streamed) candidate awaiting ranking.
+    private var isIntermediate: Bool { hit.score == 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1609,12 +2339,14 @@ struct ResultRow: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                 Spacer()
-                Text("via \(hit.source)")
-                    .font(.system(size: 10))
-                    .foregroundColor(Color(NSColor.tertiaryLabelColor))
-                Text("\(Int(hit.score * 100))%")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(scoreColor(hit.score))
+                if !isIntermediate {
+                    Text("via \(hit.source)")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                    Text("\(Int(hit.score * 100))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(scoreColor(hit.score))
+                }
             }
             Text(hit.snippet.trimmingCharacters(in: .whitespacesAndNewlines))
                 .font(.system(size: 12, design: .monospaced))
@@ -1625,20 +2357,82 @@ struct ResultRow: View {
                 .background(Color(NSColor.textBackgroundColor))
                 .cornerRadius(4)
                 .animation(.easeOut(duration: 0.2), value: isHovered)
+
+            // Structural context badge: "Called by: login_handler, auth_mw"
+            // Sourced from Graphify after ranking — shows callers/importers.
+            if let ctx = hit.structuralContext, !ctx.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 9))
+                    Text(ctx)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color(NSColor.quaternaryLabelColor))
+                .cornerRadius(3)
+            }
         }
         .padding(8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isHovered
-                    ? Color(NSColor.quaternaryLabelColor)
-                    : Color.clear)
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHovered
+                        ? Color(NSColor.quaternaryLabelColor)
+                        : Color.clear)
+                // Shimmer sweep — a ghostly highlight gliding across dimmed rows.
+                if isIntermediate && appeared && shimmerStarted {
+                    GeometryReader { geo in
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    gradient: Gradient(stops: [
+                                        .init(color: Color.white.opacity(0), location: 0),
+                                        .init(color: Color.white.opacity(0.04), location: 0.3),
+                                        .init(color: Color.white.opacity(0.10), location: 0.5),
+                                        .init(color: Color.white.opacity(0.04), location: 0.7),
+                                        .init(color: Color.white.opacity(0), location: 1),
+                                    ]),
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: geo.size.width * 0.5)
+                            .offset(x: shimmerOffset)
+                    }
+                }
+            }
         )
-        .opacity(appeared ? 1 : 0)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .opacity(appeared ? (isIntermediate ? 0.45 : 1) : 0)
         .offset(y: appeared ? 0 : 8)
         .onAppear {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8).delay(Double(index) * 0.04)) {
                 appeared = true
             }
+            // Start shimmer sweep for intermediate candidates — a gentle,
+            // repeating left-to-right highlight that signals "still ranking."
+            // Staggered per row (0.12s × index) so the sweep reads as a
+            // cascading wave across the result list, not a flash sync.
+            if isIntermediate {
+                let staggerDelay = Double(index) * 0.12
+                DispatchQueue.main.asyncAfter(deadline: .now() + staggerDelay) { [self] in
+                    guard self.isIntermediate else { return }
+                    shimmerStarted = true
+                    withAnimation(.linear(duration: 1.8).repeatForever(autoreverses: false)) {
+                        shimmerOffset = 600
+                    }
+                }
+            }
+        }
+        .onChange(of: hit.score) { _, newScore in
+            // When the daemon returns ranked results (score > 0), the shimmer
+            // naturally stops because isIntermediate becomes false and the
+            // offset animation target changes. SwiftUI's spring replace animation
+            // handles the transition to full opacity.
+            _ = newScore
         }
         .onHover { hovering in
             isHovered = hovering

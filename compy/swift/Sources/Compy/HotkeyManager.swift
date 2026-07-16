@@ -76,9 +76,37 @@ final class HotkeyManager {
                 // Only trust workspaceRoot if the envelope is fresh.
                 if isFresh {
                     workspaceRoot = envelope["workspaceRoot"] as? String
+                    // Mark extension as connected so the overlay shows a green dot.
+                    OverlayController.shared.state.extensionConnected = true
                 }
             }
 
+            // Cross-check via AX — try the frontmost app first, then scan all.
+            // When two Antigravity windows are open (different projects), both
+            // extensions write to the same shared file — whichever wrote last
+            // wins, but the workspaceRoot may be from the WRONG window.
+            //
+            // Option D (Session 26): when AX and extension disagree, trust the
+            // more specific path. If extension's workspace is a subdirectory of
+            // what AX found, the extension is correct (e.g. AX finds "Desktop/"
+            // from Finder, but extension correctly says "Desktop/garden_warriors/").
+            // Only trust AX when the paths are completely distinct projects
+            // (the multi-window race condition).
+            if let axRoot = Self.resolveWorkspaceViaFrontmostEditor(),
+               axRoot != "/" {  // never trust filesystem root
+                if let extRoot = workspaceRoot, axRoot != extRoot {
+                    if extRoot.hasPrefix(axRoot + "/") {
+                        // Extension is a subdirectory — more specific, keep it.
+                        Self._debugAXLog("AX: keeping extension=\(extRoot), more specific than frontmost=\(axRoot)")
+                    } else {
+                        // Paths are completely distinct — multi-window race, trust AX.
+                        Self._debugAXLog("AX-override: extension=\(extRoot) frontmost=\(axRoot) — trusting frontmost (distinct paths)")
+                        workspaceRoot = axRoot
+                    }
+                } else if workspaceRoot == nil {
+                    workspaceRoot = axRoot
+                }
+            }
             OverlayController.shared.toggle(
                 selectedText: selectionText,
                 file: selectionFile,
@@ -90,5 +118,134 @@ final class HotkeyManager {
 
     deinit {
         if let monitor = monitor { NSEvent.removeMonitor(monitor) }
+    }
+
+    // MARK: - Accessibility API Workspace Detection (zero-config fallback)
+
+    /// Resolve the workspace via AX: first try the frontmost app, then scan
+    /// ALL running apps for any editor with an open document.  Uses AXUIElement
+    /// to read `kAXDocumentAttribute` off each app's focused window, then walks
+    /// up to find the .git root.
+    ///
+    /// Called both as a fallback (no extension) AND as a cross-check on every
+    /// hotkey (verify extension's workspaceRoot against the actual frontmost
+    /// window — see onHotkey()).
+    static func resolveWorkspaceViaFrontmostEditor() -> String? {
+        // 1. Check COMPY_TARGET env var first — explicit override takes priority.
+        if let target = ProcessInfo.processInfo.environment["COMPY_TARGET"],
+           !target.isEmpty {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: target, isDirectory: &isDir),
+               isDir.boolValue {
+                return target
+            }
+        }
+
+        // 2. Try the FRONTMOST app first — the user's editor is almost always
+        //    the app they're looking at when they press Cmd+Shift+Space.
+        //    Previously we scanned all apps equally, which let Finder/Terminal
+        //    win if they happened to appear earlier in the process list.
+        let compyRoot = ProcessInfo.processInfo.environment["COMPY_ROOT"] ?? ""
+        if let frontApp = NSWorkspace.shared.frontmostApplication {
+            if let ws = Self._workspaceForApp(pid: frontApp.processIdentifier),
+               ws != compyRoot {
+                _debugAXLog("Accessibility: frontmost app pid=\(frontApp.processIdentifier) -> \(ws)")
+                return ws
+            }
+        }
+
+        // 3. Fall back to scanning all running apps.
+        //    Budget only counts apps that actually returned a document path
+        //    (apps without documents pass through instantly), so we don't
+        //    exhaust the budget on Slack/browser/etc before reaching the editor.
+        var bestFallback: String? = nil
+        let runningApps = NSWorkspace.shared.runningApplications
+        var scanned = 0
+        let maxScan = 20  // cap on apps-with-documents checked
+
+        for app in runningApps {
+            guard scanned < maxScan else { break }
+            guard app.activationPolicy == .regular else { continue }
+
+            guard let workspace = Self._workspaceForApp(pid: app.processIdentifier) else {
+                continue  // No document — don't count against budget
+            }
+            scanned += 1
+
+            // Prefer any workspace that isn't the Compy project itself.
+            // When Terminal is frontmost and CWD is Compy/, its document
+            // attribute resolves to Compy/ — we skip that and keep looking.
+            if !compyRoot.isEmpty && workspace == compyRoot {
+                _debugAXLog("Accessibility: skipped Compy root from pid=\(app.processIdentifier)")
+                bestFallback = workspace  // keep as last resort
+                continue
+            }
+
+            _debugAXLog("Accessibility: found workspace pid=\(app.processIdentifier) -> \(workspace)")
+            return workspace
+        }
+
+        // 4. No non-Comp workspace found — return the Compy fallback if we have one.
+        _debugAXLog("Accessibility: returning fallback = \(bestFallback ?? "nil")")
+        return bestFallback
+    }
+
+    /// Read an app's focused window document path and walk up to find the
+    /// .git root.  Returns nil if the app has no focused window, no document,
+    /// or the document path is invalid.
+    private static func _workspaceForApp(pid: pid_t) -> String? {
+        let appElement = AXUIElementCreateApplication(pid)
+
+        var focusedWindow: CFTypeRef?
+        let windowResult = AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow
+        )
+        guard windowResult == .success,
+              let fw = focusedWindow else { return nil }
+        let windowElement = fw as! AXUIElement
+
+        var docValue: CFTypeRef?
+        let docResult = AXUIElementCopyAttributeValue(
+            windowElement,
+            kAXDocumentAttribute as CFString,
+            &docValue
+        )
+        guard docResult == .success,
+              let docURL = (docValue as? URL)
+                  ?? (docValue as? String).flatMap({ URL(string: $0) })
+                  ?? (docValue as? String).flatMap({ URL(fileURLWithPath: $0) }) else {
+            return nil
+        }
+
+        let docPath = docURL.path
+        // Walk up to find .git root.
+        var current = URL(fileURLWithPath: docPath).deletingLastPathComponent()
+        for _ in 0..<10 {
+            let gitDir = current.appendingPathComponent(".git")
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: gitDir.path, isDirectory: &isDir) {
+                _debugAXLog("Accessibility: workspace (git root) = \(current.path) (pid=\(pid))")
+                return current.path
+            }
+            if current.path == "/" || current.pathComponents.count <= 1 { break }
+            current = current.deletingLastPathComponent()
+        }
+        // No .git root — return document's parent directory.
+        return URL(fileURLWithPath: docPath).deletingLastPathComponent().path
+    }
+
+    /// Write a diagnostic line to the debug log — non-essential, failures swallowed.
+    private static func _debugAXLog(_ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "[AX \(ts)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/compy-debug.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 }

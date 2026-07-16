@@ -12,6 +12,7 @@
 #   ./compy.sh ollama-stop   Stop the Ollama server
 #   ./compy.sh ollama-status Check if Ollama is running and what models are loaded
 #   ./compy.sh stt-test      Test speech-to-text (records 3s from mic, transcribes)
+#   ./compy.sh stop          Kill all Compy processes (overlay, daemon, listener)
 #
 # All subcommands exit 0 on success.
 
@@ -148,6 +149,14 @@ except: print('Ollama OFFLINE or unreachable')
     fi
 }
 
+cmd_stop() {
+    echo "Killing all Compy processes..."
+    pkill -f 'Compy' 2>/dev/null && echo "  overlay: killed" || echo "  overlay: not running"
+    pkill -f 'compy.sh' 2>/dev/null && echo "  launcher: killed" || echo "  launcher: not running"
+    pkill -f 'socket_listener' 2>/dev/null && echo "  listener: killed" || echo "  listener: not running"
+    echo "Done."
+}
+
 cmd_stt_test() {
     echo "Recording 3 seconds from default microphone..."
     echo "Speak a short query now."
@@ -166,8 +175,9 @@ case "${1:-build}" in
     ollama-stop)   cmd_ollama_stop ;;
     ollama-status) cmd_ollama_status ;;
     stt-test)      cmd_stt_test ;;
+    stop)          cmd_stop ;;
     *)
-        echo "usage: compy.sh {build|test|listen|overlay|query|install|ollama-start|ollama-stop|ollama-status|stt-test}"
+        echo "usage: compy.sh {build|test|listen|overlay|query|install|stop|ollama-start|ollama-stop|ollama-status|stt-test}"
         exit 1
         ;;
 esac
