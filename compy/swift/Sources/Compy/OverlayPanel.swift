@@ -153,7 +153,7 @@ struct EditorOpener {
                 guard FileManager.default.isExecutableFile(atPath: path) else { continue }
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: path)
-                proc.arguments = ["-g", "\(resolved):\(line)"]
+                proc.arguments = ["-r", "-g", "\(resolved):\(line)"]
                 do {
                     pendingLock.lock()
                     pendingEditors.append(proc)
