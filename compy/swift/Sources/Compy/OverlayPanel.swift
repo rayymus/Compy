@@ -346,7 +346,7 @@ struct STTResult: Codable {
 
 final class OverlayState: ObservableObject {
     enum Mode { case mic, text }
-    enum Phase { case empty, processing, results, noMatch, degraded }
+    enum Phase { case empty, processing, results, noMatch, degraded, refactorProposal }
 
     @Published var mode: Mode = .mic
     @Published var phase: Phase = .empty
@@ -372,6 +372,10 @@ final class OverlayState: ObservableObject {
     @Published var noMatchSuggestions: [String]? = nil
     /// Brief toast message shown in the input bar after commands like /workspace.
     @Published var toastMessage: String? = nil
+    /// Staged refactor token — non-nil while showing a refactor proposal.
+    @Published var refactorToken: String? = nil
+    /// Files that would change in the current refactor proposal.
+    @Published var refactorProposals: [FileProposal] = []
 
     /// The last-submitted query — captured so the session-export HTML can show
     /// what was actually searched for (state.text is cleared after submit).
@@ -617,6 +621,7 @@ final class OverlayState: ObservableObject {
         case .processing: return intentProcessingFace
         case .results: return intentResultsFace
         case .noMatch: return ">!?<"
+        case .refactorProposal: return ">O<"
         case .degraded: return ">x_<"
         }
     }
@@ -691,6 +696,7 @@ final class OverlayState: ObservableObject {
             default: return .green
             }
         case .noMatch: return .orange
+        case .refactorProposal: return .cyan
         case .degraded: return .red
         }
     }
@@ -925,6 +931,8 @@ final class OverlayState: ObservableObject {
         stopBlinkTimer()
         stopDartTimer()
         stopIdleShifts()
+        refactorToken = nil
+        refactorProposals = []
         noMatchSuggestions = nil
         // noMatchHint picked lazily when .noMatch displays
         noMatchHint = ""
@@ -965,6 +973,8 @@ struct OverlayView: View {
             return "Ask a follow-up…"
         } else if state.phase == .noMatch {
             return "Try a different query…"
+        } else if state.phase == .refactorProposal {
+            return "Press Enter to accept, Esc to reject…"
         }
         return "Search codebase..."
     }
@@ -1004,7 +1014,7 @@ struct OverlayView: View {
             state.maybeTransitionFace()
         }
         .onTapGesture {
-            guard state.phase != .results, state.phase != .degraded else { return }
+            guard state.phase != .results, state.phase != .degraded, state.phase != .refactorProposal else { return }
             guard !state.isRecording else { return }
             isFocused = false
             state.mode = .mic
@@ -1014,6 +1024,10 @@ struct OverlayView: View {
             state.startIdleShifts()
             escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.keyCode == UInt16(kVK_Escape) {
+                    if state.phase == .refactorProposal {
+                        rejectRefactor()
+                        return nil
+                    }
                     OverlayController.shared.hide()
                     return nil
                 }
@@ -1040,7 +1054,7 @@ struct OverlayView: View {
     /// Per clarifications.md: ONE face at a time — either corner or content area.
     @ViewBuilder
     private var compyFace: some View {
-        if state.phase == .empty || state.phase == .noMatch {
+        if state.phase == .empty || state.phase == .noMatch || state.phase == .refactorProposal {
             faceView(size: 18)
                 .offset(y: state.faceFloatOffset)
                 .padding(.top, 6)
@@ -1065,7 +1079,7 @@ struct OverlayView: View {
     private func triggerClickReaction() {
         // Don't react during processing (already animating) or during a morph transition
         // (the click's scale bounce would fight the morph's dissolve).
-        guard state.phase != .processing else { return }
+        guard state.phase != .processing, state.phase != .refactorProposal else { return }
         guard !state.faceTransitioning else { return }
         let reactions = ["^o^", ">w<", ">3<", "O_O", ">_<", "*o*"]
         let reaction = reactions.randomElement()!
@@ -1440,6 +1454,8 @@ struct OverlayView: View {
                 resultsView
             case .noMatch:
                 noMatchState
+            case .refactorProposal:
+                refactorProposalView
             }
         }
         .frame(maxHeight: .infinity)
@@ -1959,6 +1975,96 @@ struct OverlayView: View {
         }
     }
 
+    // MARK: - Refactor Proposal View
+
+    private var refactorProposalView: some View {
+        VStack(spacing: 0) {
+            faceView(size: 28)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+
+            HStack {
+                Text("\(state.refactorProposals.count) file\(state.refactorProposals.count == 1 ? "" : "s") would change")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.primary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(state.refactorProposals) { proposal in
+                        HStack {
+                            Image(systemName: "doc.text")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Text(proposal.file)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("~\(proposal.changedLines) lines")
+                                .font(.system(size: 11))
+                                .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                        }
+                        .padding(8)
+                        .background(Color(NSColor.textBackgroundColor))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(12)
+            }
+
+            HStack(spacing: 20) {
+                Button(action: rejectRefactor) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "xmark.circle.fill")
+                        Text("Reject (Esc)")
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.1))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+
+                Button(action: confirmRefactor) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Accept (Enter)")
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.green)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.green.opacity(0.1))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func confirmRefactor() {
+        guard let token = state.refactorToken else { return }
+        state.text = "/confirm \(token)"
+        submitQuery()
+    }
+
+    private func rejectRefactor() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            state.refactorToken = nil
+            state.refactorProposals = []
+            state.text = ""
+            state.phase = .empty
+        }
+    }
+
     // MARK: - Degraded Banner
 
     private var degradedBanner: some View {
@@ -2052,7 +2158,7 @@ struct OverlayView: View {
 
     private func submitQuery() {
         guard !state.text.isEmpty else { return }
-        guard state.phase != .processing else { return }
+        guard state.phase != .processing, state.phase != .refactorProposal else { return }
 
         // ── Built-in commands ───────────────────────────────────
         // /workspace <path> — switch the search directory.
@@ -2300,13 +2406,30 @@ struct OverlayView: View {
                             if result.hits.isEmpty {
                                 state.phase = .noMatch
                             } else {
+                                if let proposals = result.refactorProposals, !proposals.isEmpty {
+                                state.refactorToken = result.refactorToken
+                                state.refactorProposals = proposals
+                                state.phase = .refactorProposal
+                            } else {
                                 state.phase = result.degraded ? .degraded : .results
+                            }
                             }
                         }
                         if result.hits.isEmpty {
-                            hapticNoMatch()
-                            state.noMatchSuggestions = result.suggestions
-                            state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
+                            if result.intent == "format" && !result.degraded {
+                                // Format succeeded — show toast and reset.
+                                state.toastMessage = "✓ Formatted"
+                                state.text = ""
+                                state.phase = .empty
+                                hapticSuccess()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    withAnimation(.easeOut(duration: 0.2)) { state.toastMessage = nil }
+                                }
+                            } else {
+                                hapticNoMatch()
+                                state.noMatchSuggestions = result.suggestions
+                                state.noMatchHint = CompyMessagePool.pick(from: CompyMessagePool.noMatchHints, category: "noMatchHints")
+                            }
                         } else {
                             hapticSuccess()
                         }

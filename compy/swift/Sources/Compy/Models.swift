@@ -65,6 +65,26 @@ struct QueryResult: Codable {
     let degraded: Bool
     let reason: String?
     let suggestions: [String]?  // "did you mean X?" on no-match
+    let refactorProposals: [FileProposal]?  // files that would change (format intent)
+    let refactorToken: String?  // pointer to staged edits for /confirm
+
+    enum CodingKeys: String, CodingKey {
+        case intent, hits, degraded, reason, suggestions
+        case refactorProposals = "refactor_proposals"
+        case refactorToken = "refactor_token"
+    }
+}
+
+/// Mirrors compy.daemon.models.FileProposal — a single file change in a refactor.
+struct FileProposal: Codable, Identifiable {
+    var id: String { file }
+    let file: String
+    let changedLines: Int
+
+    enum CodingKeys: String, CodingKey {
+        case file
+        case changedLines = "changed_lines"
+    }
 }
 
 /// Intermediate streaming event: grep candidates emitted before ranking completes.

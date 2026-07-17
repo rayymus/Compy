@@ -116,6 +116,30 @@ def _evaluate(
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
+    # --- Format / refactor path: formatters + staged apply ---
+    if parsed.intent == "format":
+        from .refactor import apply_staged, stage_format, undo_last
+        q = question.strip()
+        # /confirm <token> — apply a previously staged edit.
+        if q.startswith("/confirm"):
+            parts = q.split(" ", 1)
+            if len(parts) < 2 or not parts[1].strip():
+                return parsed, (), True, "Missing token — use /confirm <token>"
+            token = parts[1].strip()
+            result = apply_staged(token, workspace)
+            return parsed, result.hits, result.degraded, result.reason
+        # /undo — restore from the last undo snapshot.
+        if q == "/undo":
+            result = undo_last()
+            return parsed, result.hits, result.degraded, result.reason
+        # Otherwise: stage a format proposal for the selected file.
+        if selection:
+            result = stage_format(selection, workspace)
+            if result is not None:
+                return parsed, result.hits, result.degraded, result.reason
+        # No file to format — fall through to fuzzy with a hint.
+        return parsed, (), True, "No file selected to format — select a file in the editor first."
+
     # --- Trace path: stack traces get zero-LLM structural search ---
     if parsed.intent == "trace":
         # Check the question text first — that's where the user pasted the trace.

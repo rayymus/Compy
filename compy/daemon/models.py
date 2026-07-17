@@ -100,6 +100,21 @@ class QueryResult:
     degraded: bool = False
     reason: str | None = None  # human-readable explanation when degraded=True
     suggestions: tuple[str, ...] | None = None  # "did you mean X?" on no-match
+    # Refactoring pipeline — set when intent="format" and proposals are staged.
+    refactor_proposals: tuple[FileProposal, ...] | None = None  # files that would change
+    refactor_token: str | None = None  # pointer to staged edits on disk for /confirm
+
+
+@dataclass(frozen=True)
+class FileProposal:
+    """A single file change proposal in a refactoring operation.
+
+    Lightweight — just the file path and a change summary.  Full diffs are
+    reviewed in the editor, not rendered inside the overlay.
+    """
+
+    file: str
+    changed_lines: int  # approximate — lines added + removed
 
 
 def to_json(obj: Any) -> str:
