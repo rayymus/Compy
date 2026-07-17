@@ -45,6 +45,10 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"\bwhat('s| is) unused\b|\bdead code\b|\bwhat isn('t|ot) (being |)used\b|\bfind unused\b|\bunreferenced\b", "dead_code"),
     # Overview / catch-up Q&A: broad repo questions about architecture, flow, structure.
     (r"\bhow does\b|\bgive me an overview\b|\bexplain the (codebase|repo|architecture|structure)\b|\bhow (is|are)\b.*\b(organized|structured|laid out)\b|\bwhat (is|are) the (main|key) (modules?|components?|parts?)\b", "overview"),
+    # Rename: "rename X to Y" — explicit triggering, never inferred.
+    # \b (not ^) allows leading whitespace, punctuation, or natural-language
+    # prefixes like "please rename..." — intent must still start with "rename".
+    (r"\brename\s+([\w]+)\s+to\s+([\w]+)", "rename"),
     # Format / refactor: "format this file", "format the code", "/undo", "/confirm".
     (r"\bformat (this|the) (file|code|selection)\b|^/(?:undo|confirm)\b", "format"),
     # Fuzzy: catch-all for natural-language search.
@@ -331,6 +335,15 @@ class RuleBasedParser:
             else:
                 intent = "fuzzy"
                 confidence = 0.45
+        # rename: extract "old_name::new_name" from the regex capture groups.
+        if intent == "rename":
+            m = re.search(r"\brename\s+([\w]+)\s+to\s+([\w]+)", question, re.IGNORECASE)
+            if m:
+                symbol = f"{m.group(1)}::{m.group(2)}"
+                confidence = 0.95
+            else:
+                intent = "fuzzy"
+                confidence = 0.40
         keywords = _pre_keywords
         # Gap 2 (Session 20): Inject the selection symbol into fuzzy keywords.
         # The user selected a piece of code — the symbol from that code should

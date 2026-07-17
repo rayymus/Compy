@@ -312,6 +312,147 @@ def test_cleanup_stale_staged_empty_dir():
         _cleanup_stale_staged()  # Should not raise.
 
 
+# ── Rename: parser extraction ──────────────────────────────────────────
+
+def test_rename_parser_extracts_old_new():
+    """Parser extracts old_name::new_name from 'rename foo to bar'."""
+    parser = RuleBasedParser()
+    result = parser.parse("rename foo to bar", None)
+    assert result.intent == "rename"
+    assert result.symbol == "foo::bar"
+    assert result.confidence == 0.95
+
+
+def test_rename_parser_with_leading_text():
+    """\\b anchor allows 'please rename foo to bar' to match."""
+    parser = RuleBasedParser()
+    result = parser.parse("please rename foo to bar", None)
+    assert result.intent == "rename", f"got {result.intent} — leading text should match"
+    assert result.symbol == "foo::bar"
+
+
+def test_rename_parser_case_insensitive():
+    """Rename X to Y is case-insensitive on intent matching."""
+    parser = RuleBasedParser()
+    result = parser.parse("RENAME getUsers TO get_users", None)
+    assert result.intent == "rename", f"got {result.intent}"
+    # Extraction preserves original case.
+    assert result.symbol == "getUsers::get_users"
+
+
+# ── Rename: stage / apply / undo ────────────────────────────────────────
+
+def test_rename_stage_no_graph():
+    """stage_rename returns None when no graph/callers found."""
+    from compy.daemon.refactor import stage_rename
+
+    # Create a mock grapher that returns empty callers.
+    mock_grapher = mock.Mock()
+    mock_grapher._graph = None
+    mock_grapher.query.return_value = ()  # no callers
+    mock_grapher.load = mock.Mock()  # no-op
+
+    result = stage_rename("foo", "bar", "/tmp", mock_grapher)
+    assert result is None
+
+
+def test_rename_stage_with_mock_graph():
+    """End-to-end: mock graph with callers + tree-sitter, verify proposal."""
+    from compy.daemon.refactor import stage_rename
+    from compy.daemon.models import GrepHit
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # Create a Python file with the symbol to rename.
+        content = "def get_users():\n    return []\n\ndef main():\n    get_users()\n"
+        py_file = _write_py_file(root, "users.py", content)
+
+        # Build a mock graph that has a definition node for get_users.
+        mock_graph = mock.Mock()
+        mock_graph.nodes = {
+            "users.py::get_users": {"file": "users.py", "kind": "function", "line": 1},
+        }
+        mock_graph.__getitem__ = mock_graph.nodes.__getitem__
+
+        # Mock grapher.
+        mock_grapher = mock.Mock()
+        mock_grapher._graph = mock_graph
+        mock_grapher.query.return_value = (
+            GrepHit(file="users.py", line=1, column=0, snippet="def get_users():"),
+            GrepHit(file="users.py", line=4, column=0, snippet="    get_users()"),
+        )
+
+        # Mock tree-sitter in _rename_in_file.
+        # We need to simulate finding identifier nodes matching 'get_users'.
+        with mock.patch("compy.daemon.refactor._rename_in_file") as mock_rename_file:
+            from compy.daemon.refactor import _StagedEdit
+
+            renamed = content.replace("get_users", "fetch_users")
+            mock_rename_file.return_value = _StagedEdit(
+                file=str(py_file),
+                original=content,
+                formatted=renamed,
+            )
+
+            result = stage_rename("get_users", "fetch_users", str(root), mock_grapher)
+
+        assert result is not None
+        assert result.intent == "rename"
+        assert result.refactor_token is not None
+        assert result.refactor_proposals is not None
+        assert len(result.refactor_proposals) >= 1
+
+        # Verify staged file exists and is valid.
+        stage_path = STAGE_DIR / f"compy-staged-{result.refactor_token}.json"
+        assert stage_path.exists()
+        data = json.loads(stage_path.read_text(encoding="utf-8"))
+        assert isinstance(data, list)
+        assert len(data) >= 1
+        # Clean up.
+        stage_path.unlink(missing_ok=True)
+
+
+def test_rename_apply_and_undo():
+    """Stage a rename, apply it, verify file changed, undo, verify restored."""
+    from compy.daemon.refactor import _StagedEdit
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        content = "def get_users():\n    return []\n"
+        renamed = "def fetch_users():\n    return []\n"
+        py_file = _write_py_file(root, "users.py", content)
+
+        # Stage a rename manually (bypass tree-sitter).
+        token = "renametest"
+        edit = _StagedEdit(file=str(py_file), original=content, formatted=renamed)
+        stage_path = STAGE_DIR / f"compy-staged-{token}.json"
+        stage_path.write_text(
+            json.dumps([{"file": e.file, "original": e.original, "formatted": e.formatted}
+                        for e in [edit]]),
+            encoding="utf-8",
+        )
+
+        try:
+            # Apply.
+            applied = apply_staged(token, str(root))
+            assert applied.degraded is False
+            assert "Applied" in applied.reason
+
+            # Verify file changed.
+            assert py_file.read_text(encoding="utf-8") == renamed
+
+            # Undo.
+            undone = undo_last()
+            assert undone.degraded is False
+            assert py_file.read_text(encoding="utf-8") == content
+
+            # Undo file cleaned up.
+            assert not UNDO_PATH.exists()
+        finally:
+            stage_path.unlink(missing_ok=True)
+            UNDO_PATH.unlink(missing_ok=True)
+
+
 # ── Orchestrator routing ────────────────────────────────────────────────
 
 def test_confirm_without_token_returns_degraded():

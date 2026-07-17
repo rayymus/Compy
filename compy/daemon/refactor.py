@@ -85,6 +85,134 @@ def _verify_python(source: str) -> str | None:
     return None
 
 
+# ── Tier 2: AST-scoped rename ───────────────────────────────────────────
+
+def stage_rename(
+    old_name: str, new_name: str, workspace: str, grapher,
+) -> QueryResult | None:
+    """Generate rename proposals: find every identifier AST node matching
+    old_name via Graphify callers + definition, tree-sitter-scoped.
+
+    Returns QueryResult with multiple FileProposals + one refactor_token,
+    or None if no references found / tree-sitter unavailable.
+    """
+    from .graphify import _resolve_node
+
+    _cleanup_stale_staged()
+
+    # 1. Collect affected files: definition site + all callers.
+    affected: set[str] = set()
+    try:
+        grapher.load(workspace)
+    except Exception:
+        return None  # Graphify unavailable.
+
+    # Find the definition node's file via the graph.
+    graph = grapher._graph  # type: ignore[attr-defined]
+    if graph is not None:
+        def_node = _resolve_node(old_name, graph)
+        if def_node is not None:
+            def_file = graph.nodes[def_node].get("file", "")
+            if def_file:
+                affected.add(def_file)
+
+    # Add all caller files.
+    callers = grapher.query(old_name, intent="callers")  # type: ignore[union-attr]
+    for h in callers:
+        affected.add(h.file)
+
+    if not affected:
+        return None
+
+    # 2. For each affected file, find identifier AST nodes matching old_name.
+    edits: list[_StagedEdit] = []
+    for rel_path in affected:
+        file_path = (Path(workspace).resolve() / rel_path)
+        if not file_path.exists() or file_path.suffix != ".py":
+            continue
+        try:
+            result = _rename_in_file(str(file_path), old_name, new_name)
+        except Exception:
+            continue
+        if result is not None:
+            edits.append(result)
+
+    if not edits:
+        return None
+
+    # 3. Stage all edits under one token.
+    token = _make_token()
+    stage_path = STAGE_DIR / f"compy-staged-{token}.json"
+    stage_path.write_text(
+        json.dumps([asdict(e) for e in edits]), encoding="utf-8",
+    )
+
+    proposals = tuple(
+        FileProposal(
+            file=str(Path(e.file).resolve().relative_to(Path(workspace).resolve())),
+            changed_lines=abs(e.original.count("\n") - e.formatted.count("\n")) + 1,
+        )
+        for e in edits
+    )
+
+    return QueryResult(
+        intent="rename",
+        refactor_proposals=proposals,
+        refactor_token=token,
+        reason=f"Staged rename of '{old_name}' → '{new_name}'. Note: string, comment, and config references skipped for safety.",
+    )
+
+
+def _rename_in_file(file_path: str, old_name: str, new_name: str) -> _StagedEdit | None:
+    """Parse a file with tree-sitter, find all identifier nodes matching
+    old_name, and produce the renamed content via bottom-up replacement.
+
+    Returns a _StagedEdit with original + formatted, or None if no matches.
+    """
+    try:
+        import tree_sitter_python as tspython
+        from tree_sitter import Language, Parser, Query
+    except Exception:
+        return None  # tree-sitter unavailable.
+
+    try:
+        original_bytes = Path(file_path).read_bytes()
+    except OSError:
+        return None
+
+    lang = Language(tspython.language())
+    parser = Parser(lang)
+    tree = parser.parse(original_bytes)
+
+    # Query for all identifier nodes, filter by text match.
+    id_query = Query(lang, "(identifier) @id")
+    matches: list[tuple[int, int]] = []  # (start_byte, end_byte)
+
+    for cap_name, cap_nodes in id_query.captures(tree.root_node).items():
+        for node in cap_nodes:
+            if node.text is not None and node.text.decode("utf-8") == old_name:
+                matches.append((node.start_byte, node.end_byte))
+
+    if not matches:
+        return None
+
+    # Sort bottom-up (reverse byte order) for safe replacement.
+    matches.sort(key=lambda m: m[0], reverse=True)
+
+    # Apply replacements.
+    result = bytearray(original_bytes)
+    new_bytes = new_name.encode("utf-8")
+    for start, end in matches:
+        result[start:end] = new_bytes
+
+    formatted = result.decode("utf-8")
+    return _StagedEdit(
+        file=file_path,
+        original=original_bytes.decode("utf-8"),
+        formatted=formatted,
+    )
+
+
 def _cleanup_stale_staged() -> None:
     """Remove staged edit files older than 5 minutes — orphans from rejected proposals."""
     cutoff = time.time() - 300  # 5 minutes
@@ -207,59 +335,64 @@ def apply_staged(token: str, workspace: str) -> QueryResult:
 
     try:
         data = json.loads(stage_path.read_text(encoding="utf-8"))
-        edit = _StagedEdit(**data)
+        # Support both single-edit (Tier 1 format) and multi-edit (Tier 2 rename).
+        edits: list[_StagedEdit] = (
+            [_StagedEdit(**data)] if isinstance(data, dict)
+            else [_StagedEdit(**e) for e in data]
+        )
     except (json.JSONDecodeError, TypeError):
         return QueryResult(
             intent="format", degraded=True,
             reason="Corrupt staged edit file.",
         )
 
-    file_path = Path(edit.file)
-    if not file_path.exists():
-        stage_path.unlink(missing_ok=True)
-        return QueryResult(
-            intent="format", degraded=True,
-            reason=f"File no longer exists: {edit.file}",
-        )
+    applied: list[str] = []
+    errors: list[str] = []
+    for edit in edits:
+        file_path = Path(edit.file)
+        if not file_path.exists():
+            errors.append(f"{edit.file}: no longer exists")
+            continue
 
-    # Atomic write: write to temp, rename over original.
-    try:
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(file_path.parent), prefix=".compy-", suffix=".tmp",
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(edit.formatted)
-        os.replace(tmp_name, str(file_path))  # atomic on same filesystem
-    except OSError as exc:
-        return QueryResult(
-            intent="format", degraded=True,
-            reason=f"Atomic write failed: {exc}",
-        )
+        # Atomic write: write to temp, rename over original.
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(file_path.parent), prefix=".compy-", suffix=".tmp",
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(edit.formatted)
+            os.replace(tmp_name, str(file_path))  # atomic on same filesystem
+        except OSError as exc:
+            errors.append(f"{edit.file}: write failed: {exc}")
+            continue
 
-    # Backup: snapshot pre-edit bytes for undo (AFTER successful write).
-    _register_undo(edit)
+        # Backup: snapshot pre-edit bytes for undo (AFTER successful write).
+        _register_undo(edit)
 
-    # Post-write verify: re-read from disk and parse-check.
-    try:
-        written = file_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return QueryResult(
-            intent="format", degraded=True,
-            reason=f"Post-write read failed: {exc}",
-        )
-    err = _verify_syntax(str(file_path), written)
-    if err:
-        return QueryResult(
-            intent="format", degraded=True,
-            reason=f"Post-write verify failed: {err}",
-        )
+        # Post-write verify: re-read from disk and parse-check.
+        try:
+            written = file_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{edit.file}: post-write read failed: {exc}")
+            continue
+        err = _verify_syntax(str(file_path), written)
+        if err:
+            errors.append(f"{edit.file}: post-write verify failed: {err}")
+            continue
+        applied.append(edit.file)
 
     # Clean up staged file.
     stage_path.unlink(missing_ok=True)
 
+    if errors:
+        return QueryResult(
+            intent="format", degraded=True,
+            reason=f"Applied {len(applied)} files, {len(errors)} failed: {'; '.join(errors[:3])}",
+        )
     return QueryResult(
         intent="format",
-        hits=(),  # empty hits — success is communicated via intent + non-degraded
+        hits=(),
+        reason=f"Applied {len(applied)} file{'s' if len(applied) != 1 else ''}",
     )
 
 

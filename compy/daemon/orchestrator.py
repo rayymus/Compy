@@ -116,6 +116,23 @@ def _evaluate(
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
+    # --- Rename path: graph-verified identifier rename ---
+    if parsed.intent == "rename" and grapher is not None:
+        symbol = parsed.symbol
+        if symbol and "::" in symbol:
+            old_name, new_name = symbol.split("::", 1)
+            from .refactor import stage_rename
+            try:
+                grapher.load(workspace)
+            except ReasonerUnavailable:
+                pass
+            else:
+                result = stage_rename(old_name, new_name, workspace, grapher)
+                if result is not None:
+                    return parsed, result.hits, result.degraded, result.reason
+        # No graph or no symbol — fall through with a hint.
+        return parsed, (), True, "Rename requires a valid symbol and an active code graph."
+
     # --- Format / refactor path: formatters + staged apply ---
     if parsed.intent == "format":
         from .refactor import apply_staged, stage_format, undo_last
