@@ -325,10 +325,24 @@ class GraphBuilder:
         self._staleness[workspace_root] = (now, False)
         return False
 
-    def get_graph(self, workspace_root: str, *, force_rebuild: bool = False) -> nx.DiGraph:
-        """Return the cached graph, auto-rebuilding if workspace files are newer."""
+    def get_graph(self, workspace_root: str, *, force_rebuild: bool = False, fast_only: bool = False) -> nx.DiGraph:
+        """Return the cached graph, auto-rebuilding if workspace files are newer.
+
+        When `fast_only=True`, skips staleness checks and rebuilds entirely —
+        returns the cached pickle if it exists, raises otherwise.  Used for
+        reasoner enrichment where graph building would block the query pipeline.
+        """
         cache_key = _cache_key(workspace_root)
         cache_path = self._cache_dir / cache_key
+
+        if fast_only:
+            if not cache_path.exists():
+                raise ReasonerUnavailable(f"Graphify: no cached graph for {workspace_root}")
+            try:
+                with open(cache_path, "rb") as f:
+                    return pickle.load(f)
+            except (pickle.PickleError, EOFError) as exc:
+                raise ReasonerUnavailable(f"Graphify: corrupt cache: {exc}") from exc
 
         if not force_rebuild and cache_path.exists():
             if self._is_stale(workspace_root, cache_path):
@@ -373,10 +387,10 @@ class GraphQuerier:
         self._graph: nx.DiGraph | None = None
         self._workspace: str | None = None
 
-    def load(self, workspace_root: str, *, force_rebuild: bool = False) -> None:
+    def load(self, workspace_root: str, *, force_rebuild: bool = False, fast_only: bool = False) -> None:
         """Load (or build) the graph for a workspace."""
         try:
-            self._graph = self._builder.get_graph(workspace_root, force_rebuild=force_rebuild)
+            self._graph = self._builder.get_graph(workspace_root, force_rebuild=force_rebuild, fast_only=fast_only)
             self._workspace = workspace_root
         except Exception as exc:
             raise ReasonerUnavailable(f"Graphify: {exc}") from exc

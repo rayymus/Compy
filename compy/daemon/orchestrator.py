@@ -90,11 +90,11 @@ def run(
         grapher=grapher,
         historian=historian,
         on_candidates=on_candidates,
+        session_context=request.session_context,
     )
     # Annotate results with structural context from Graphify (callers/importers).
-    if hits and grapher is not None:
-        hits = _annotate_structural_context(hits, grapher, workspace)
-    # On empty results, generate smart suggestions (synonyms, selection hints).
+    # Since Layer 2 enrichment already computed context per GrepHit, and reasoners
+    # propagate it to RankedHit.structural_context, no duplicate Graphify query needed.
     suggestions = _generate_suggestions(parsed, request.selection) if not hits else None
     return QueryResult(intent=parsed.intent, hits=hits, degraded=degraded, reason=reason, suggestions=suggestions)
 
@@ -111,6 +111,7 @@ def _evaluate(
     grapher: Grapher | None = None,
     historian: Historian | None = None,
     on_candidates: Callable[[tuple[GrepHit, ...]], None] | None = None,
+    session_context: tuple[str, ...] | None = None,
 ) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None]:
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
@@ -167,6 +168,8 @@ def _evaluate(
                         question=question, candidates=candidates,
                         selection_file=sel_file, selection_text=sel_text,
                         on_candidates=on_candidates,
+                        grapher=grapher, historian=historian,
+                        workspace=workspace, session_context=session_context,
                     )
         # Graph returned empty — fall through to fuzzy grep.
         parsed = replace(parsed, intent="fuzzy")
@@ -182,6 +185,8 @@ def _evaluate(
                 question=question, candidates=candidates,
                 selection_file=sel_file, selection_text=sel_text,
                 on_candidates=on_candidates,
+                grapher=grapher, historian=historian,
+                workspace=workspace, session_context=session_context,
             )
         # No git history found — fall through to fuzzy grep.
         parsed = replace(parsed, intent="fuzzy")
@@ -231,6 +236,8 @@ def _evaluate(
                     question=question, candidates=candidates,
                     selection_file=sel_file, selection_text=sel_text,
                     on_candidates=on_candidates,
+                    grapher=grapher, historian=historian,
+                    workspace=workspace, session_context=session_context,
                 )
         parsed = replace(parsed, intent="fuzzy")
     # If grapher is None, fall through to fuzzy.
@@ -268,6 +275,8 @@ def _evaluate(
                 question=question, candidates=hits,
                 selection_file=sel_file, selection_text=sel_text,
                 on_candidates=on_candidates,
+                grapher=grapher, historian=historian,
+                workspace=workspace, session_context=session_context,
             )
 
     # Fuzzy path: try multi-keyword AND search, then individual keywords.
@@ -315,6 +324,8 @@ def _evaluate(
             question=question, candidates=candidates,
             selection_file=sel_file, selection_text=sel_text,
             on_candidates=on_candidates,
+            grapher=grapher, historian=historian,
+            workspace=workspace, session_context=session_context,
         )
     return parsed, (), False, "no actionable intent"
 
@@ -328,15 +339,37 @@ def _rank_or_degrade(
     selection_file: str | None = None,
     selection_text: str | None = None,
     on_candidates: Callable[[tuple[GrepHit, ...]], None] | None = None,
+    grapher: Grapher | None = None,
+    historian: Historian | None = None,
+    workspace: str = ".",
+    session_context: tuple[str, ...] | None = None,
 ) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None]:
     """Try the reasoner chain. Every failure falls through, all-failure degrades to grep hint."""
     # Stream intermediate candidates to the overlay BEFORE blocking on reasoner.
     if on_candidates and candidates:
         on_candidates(candidates)
+
+    # ── Layer 2: enrich candidates with structural context before ranking ──
+    # Graph relationships, verification hints, git history, and session memory
+    # give even a small local model enough signal to rank well.
+    enriched = _enrich_candidates_for_ranking(
+        candidates, grapher=grapher, historian=historian, workspace=workspace,
+        question=question,
+    )
+
+    # ── Layer 0: inject prior-turn results into the question for follow-ups ──
+    # "Show me the tests for that" → the reasoner sees what "that" was.
+    enriched_question = question
+    if session_context:
+        ctx_text = "Previous results (for context only — answer the current question):\n" + "\n".join(
+            s[:120] for s in session_context[:3]
+        )
+        enriched_question = f"{ctx_text}\n---\nCurrent question: {question}"
+
     last_err: str | None = None
     for r in reasoners:
         try:
-            ranked = r.reason(question, candidates,
+            ranked = r.reason(enriched_question, enriched,
                               selection_file=selection_file,
                               selection_text=selection_text)
         except ReasonerUnavailable as exc:
@@ -348,6 +381,103 @@ def _rank_or_degrade(
         last_err = f"{r.name}: returned empty"
     # Spec §3a: never hard-error; grep-only hits with a note.
     return parsed, _promote_grep(candidates, direct=False), True, f"all reasoners unavailable; {last_err or 'no reasoners configured'}"
+
+
+def _enrich_candidates_for_ranking(
+    candidates: tuple[GrepHit, ...],
+    *,
+    grapher: Grapher | None = None,
+    historian: Historian | None = None,
+    workspace: str = ".",
+    question: str = "",
+) -> tuple[GrepHit, ...]:
+    """Annotate GrepHit candidates with structural context before rankers see them.
+
+    Layer 2 from claude-response2: the reasoner (Ollama 1.5B or heuristic) gets richer
+    input — graph relationships, verification hints, git history — instead of raw grep text.
+
+    Graph lookups use fast_only=True to avoid blocking on large repos: if no cached
+    graph exists, enrichment is silently skipped and the reasoner works with bare text.
+    """
+    if grapher is None and historian is None:
+        return candidates
+
+    # Try fast-load: only use cached graph, don't rebuild.
+    graph_loaded = False
+    if grapher is not None:
+        try:
+            grapher.load(workspace, fast_only=True)
+            graph_loaded = True
+        except ReasonerUnavailable:
+            pass  # No cached graph — skip graph enrichment.
+
+    enriched: list[GrepHit] = []
+    for c in candidates:
+        ctx_parts: list[str] = []
+
+        # Graph relationships: callers/callees for the hit's symbol.
+        if graph_loaded:
+            symbol = _extract_symbol_from_snippet(c.snippet)
+            if symbol:
+                try:
+                    callers = grapher.query(symbol, intent="callers")  # type: ignore[union-attr]
+                    if callers:
+                        names = _caller_names(callers, max_items=3)
+                        if names:
+                            ctx_parts.append(f"Called by: {names}")
+                except Exception:
+                    pass  # Silently skip — enrichment is best-effort.
+
+        # Git history: blame info — only for history/rationale queries.
+        is_history_q = historian is not None and _looks_like_history_query(question)
+        if is_history_q:
+            try:
+                blame_hits = historian.query_blame(c.file, c.line, workspace)
+                if blame_hits:
+                    snippet = blame_hits[0].snippet[:80]
+                    if snippet and "Not a git repository" not in snippet:
+                        ctx_parts.append(f"git: {snippet}")
+            except Exception:
+                pass
+
+        # Lightweight verification: snippet contains the expected kind of syntax.
+        verified = _verify_snippet_kind(c.snippet)
+        if verified:
+            ctx_parts.append(verified)
+
+        ctx = "; ".join(ctx_parts) if ctx_parts else None
+        enriched.append(GrepHit(
+            file=c.file, line=c.line, column=c.column,
+            snippet=c.snippet, symbol=c.symbol, context=ctx,
+        ))
+    return tuple(enriched)
+
+
+def _looks_like_history_query(question: str) -> bool:
+    """Quick check: does this question ask about git history / blame / rationale?"""
+    q = question.lower()
+    return any(w in q for w in ("why", "who added", "who changed", "who wrote",
+                                 "blame", "commit", "history", "rationale",
+                                 "what changed", "when was"))
+
+
+def _verify_snippet_kind(snippet: str) -> str | None:
+    """Lightweight check: what kind of code construct is this snippet?
+
+    Returns a short label like 'def' or 'class' if the snippet starts with a
+    recognised definition keyword, so the reasoner knows this is a real definition
+    rather than a comment or a usage in a docstring.
+    """
+    stripped = snippet.lstrip()
+    if stripped.startswith("def ") or stripped.startswith("async def "):
+        return "def"
+    if stripped.startswith("class "):
+        return "class"
+    if stripped.startswith(("func ", "function ")):
+        return "func"
+    if " = lambda" in stripped:
+        return "lambda"
+    return None
 
 
 def _promote_grep(
@@ -366,6 +496,7 @@ def _promote_grep(
             file=h.file, line=h.line, snippet=h.snippet,
             score=1.0 if direct else 1.0 / (i + 1),
             source="grep",
+            structural_context=h.context,
         )
         for i, h in enumerate(hits)
     )
@@ -388,52 +519,6 @@ def _boost_selection_file(
     in_file = [h for h in hits if h.file == selection_file or h.file.endswith(selection_file)]
     other = [h for h in hits if h not in in_file]
     return tuple(in_file + other)
-
-
-def _annotate_structural_context(
-    hits: tuple[RankedHit, ...],
-    grapher: Grapher,
-    workspace: str,
-) -> tuple[RankedHit, ...]:
-    """Annotate RankedHits with structural context from Graphify.
-
-    For each hit, tries to extract a Python symbol name from the snippet
-    and queries Graphify for callers/importers. Results are appended as
-    a badge string like "Called by: login_handler, auth_mw" or
-    "Imported in: routes.py, main.py".
-
-    Non-Python repos (where Graphify fails to load) silently return
-    un-annotated hits.
-    """
-    try:
-        grapher.load(workspace)
-    except ReasonerUnavailable:
-        return hits  # Graphify unavailable — skip annotation silently.
-
-    annotated: list[RankedHit] = []
-    for hit in hits:
-        symbol = _extract_symbol_from_snippet(hit.snippet)
-        ctx: str | None = None
-        if symbol:
-            callers = grapher.query(symbol, intent="callers")
-            if callers:
-                names = _caller_names(callers, max_items=2)
-                if names:
-                    ctx = f"Called by: {names}"
-            if ctx is None:
-                # Try broader structural context (importers + subclasses).
-                # blast_radius queries incoming edges — what depends on this symbol.
-                imported_by = grapher.query(symbol, intent="blast_radius")
-                if imported_by:
-                    names = _caller_names(imported_by, max_items=2)
-                    if names:
-                        ctx = f"Used in: {names}"
-        annotated.append(RankedHit(
-            file=hit.file, line=hit.line, snippet=hit.snippet,
-            score=hit.score, source=hit.source,
-            structural_context=ctx,
-        ))
-    return tuple(annotated)
 
 
 def _extract_symbol_from_snippet(snippet: str) -> str | None:

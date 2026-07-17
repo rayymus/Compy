@@ -36,7 +36,13 @@ struct RankedHit: Codable, Identifiable {
 struct QueryRequest: Codable {
     let question: String
     let selection: Selection?
-    let stream: Bool  // when true, daemon emits intermediate candidates before ranking
+    let stream: Bool  // when True, daemon emits intermediate candidates before ranking
+    let sessionContext: [String]?  // previous turn's results for follow-up queries
+
+    enum CodingKeys: String, CodingKey {
+        case question, selection, stream
+        case sessionContext = "session_context"
+    }
 }
 
 /// Selection with explicit CodingKeys for `workspace_root` (daemon uses snake_case).

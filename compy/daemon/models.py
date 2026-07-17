@@ -37,13 +37,19 @@ class ParsedQuery:
 
 @dataclass(frozen=True)
 class GrepHit:
-    """A single line-level hit from ripgrep."""
+    """A single line-level hit from ripgrep.
+
+    `context` is an optional structural annotation like "Callers: login, auth_mw" —
+    computed from Graphify/gitlog before the reasoner ranks, so even a small local
+    model can leverage the code graph rather than guessing from bare text.
+    """
 
     file: str
     line: int
     column: int
     snippet: str
     symbol: str | None = None  # populated when we know which token matched
+    context: str | None = None  # structural annotation for reasoner enrichment
 
 
 @dataclass(frozen=True)
@@ -69,15 +75,19 @@ class QueryRequest:
     question: str
     selection: Selection | None = None
     stream: bool = False  # when True, daemon emits intermediate candidates before ranking
+    session_context: tuple[str, ...] | None = None  # previous turn's hits for follow-up queries
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> QueryRequest:
         sel_raw = data.get("selection")
         selection = Selection(**sel_raw) if sel_raw else None
+        ctx_raw = data.get("session_context")
+        session_context = tuple(ctx_raw) if isinstance(ctx_raw, list) else None
         return cls(
             question=data["question"],
             selection=selection,
             stream=data.get("stream", False),
+            session_context=session_context,
         )
 
 

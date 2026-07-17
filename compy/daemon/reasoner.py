@@ -178,6 +178,7 @@ class StubReasoner:
             RankedHit(
                 file=c.file, line=c.line, snippet=c.snippet,
                 score=scores[i], source="stub",
+                structural_context=c.context,
             )
             for i, c in enumerate(candidates)
         )
@@ -189,9 +190,11 @@ def _prompt(question: str, candidates: tuple[GrepHit, ...]) -> str:
     Designed so the candidate snippets get pasted into Freebuff's prompt content directly
     — this is the §8a mitigation for "Freebuff's file-picker subagent would otherwise
     re-scan the repo and we'd pay the blind whole-repo agent cost."
+
+    Each candidate line now includes structural context when available (Layer 2 enrichment).
     """
     rows = "\n".join(
-        f"[{i}] {c.file}:{c.line}: {c.snippet[:140]}" for i, c in enumerate(candidates)
+        _format_candidate_line(i, c) for i, c in enumerate(candidates)
     )
     return (
         f"{question}\n\n"
@@ -202,13 +205,25 @@ def _prompt(question: str, candidates: tuple[GrepHit, ...]) -> str:
 
 def _ollama_prompt(question: str, candidates: tuple[GrepHit, ...]) -> str:
     rows = "\n".join(
-        f"[{i}] {c.file}:{c.line}\n{c.snippet[:200]}" for i, c in enumerate(candidates)
+        _format_candidate_line(i, c, max_snippet=200) for i, c in enumerate(candidates)
     )
     return (
         f"Question: {question}\n\n"
         f"Candidates:\n{rows}\n\n"
         f"Rank candidates by relevance. Output one bracketed index per line, best first."
     )
+
+
+def _format_candidate_line(i: int, c: GrepHit, *, max_snippet: int = 140) -> str:
+    """Format a single candidate line for the reasoner prompt.
+
+    Includes structural context (callers, verification) when the orchestrator
+    has enriched the GrepHit via _enrich_candidates_for_ranking.
+    """
+    ctx = ""
+    if c.context:
+        ctx = f"  [{c.context}]"
+    return f"[{i}] {c.file}:{c.line}{ctx}\n{c.snippet[:max_snippet]}"
 
 
 def _interpret_indexed_response(
@@ -244,6 +259,7 @@ def _interpret_indexed_response(
             RankedHit(
                 file=c.file, line=c.line, snippet=c.snippet,
                 score=1.0 / (i + 1), source=source,
+                structural_context=c.context,
             )
             for i, c in enumerate(candidates)
         )
@@ -255,6 +271,7 @@ def _interpret_indexed_response(
             snippet=candidates[idx].snippet,
             score=1.0 / (rank + 1),
             source=source,
+            structural_context=candidates[idx].context,
         )
         for rank, idx in enumerate(indexed)
     )

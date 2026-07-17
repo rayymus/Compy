@@ -155,13 +155,21 @@ class HeuristicReasoner:
         # Detect if the user is asking about tests.
         asks_test = bool({"test", "tests", "testing"} & q_tokens)
 
+        # Layer 2: fold structural context (callers, verification) into the
+        # scoring text so token-overlap naturally benefits from graph signal.
+        scoring_snippets = [
+            f"{c.snippet} {c.context or ''}" for c in candidates
+        ]
+
         # Precompute token rarity across all candidate snippets.
-        all_snippets = [c.snippet for c in candidates]
-        rarity_weights = _token_rarity_weight(q_tokens, all_snippets)
+        rarity_weights = _token_rarity_weight(q_tokens, scoring_snippets)
 
         raw: list[tuple[int, float]] = []
         for i, c in enumerate(candidates):
-            s_tokens = _tokenize(c.snippet)
+            # Layer 2: enrich snippet with structural context so token-overlap
+            # scoring naturally benefits from graph relationships (callers etc.).
+            enriched_snippet = f"{c.snippet} {c.context or ''}"
+            s_tokens = _tokenize(enriched_snippet)
 
             # 1. Jaccard overlap (0.25 weight).
             jaccard = _jaccard(q_tokens, s_tokens)
@@ -170,14 +178,14 @@ class HeuristicReasoner:
             fname_tokens = _filename_tokens(c.file)
             fname_overlap = _jaccard(q_tokens, fname_tokens)
 
-            # 3. Exact symbol match (0.25 weight).
-            exact = _exact_word_matches(question, c.snippet)
+            # 3. Exact symbol match (0.25 weight) — use enriched text.
+            exact = _exact_word_matches(question, enriched_snippet)
 
             # 4. Same-directory boost (0.15 weight).
             dir_boost = 0.15 if _same_dir(selection_file, c.file) else 0.0
 
             # 5. N-gram adjacency: query bigrams appearing in snippet (0.10 weight).
-            ngram = _ngram_overlap(question, c.snippet)
+            ngram = _ngram_overlap(question, enriched_snippet)
 
             # 6. Token rarity: weighted Jaccard using IDF-like weights (0.10 weight).
             rare_overlap = 0.0
@@ -215,5 +223,6 @@ class HeuristicReasoner:
                 snippet=c.snippet,
                 score=round(scores[rank], 3),
                 source="heuristic",
+                structural_context=c.context,
             ))
         return tuple(result)

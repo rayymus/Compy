@@ -2137,7 +2137,10 @@ struct OverlayView: View {
                 workspaceRoot: activeWorkspace
             )
 
-            let request = QueryRequest(question: question, selection: sel, stream: true)
+            // Layer 0: pass previous turn's results as session context for follow-ups.
+            let sessionCtx: [String]? = state.previousResults.isEmpty ? nil :
+                state.previousResults.prefix(3).map { "\($0.file):\($0.line): \($0.snippet)" }
+            let request = QueryRequest(question: question, selection: sel, stream: true, sessionContext: sessionCtx)
             guard let jsonData = try? compyEncoder.encode(request) else {
                 _debugLog("FAIL: JSON encode failed for question='\(question)'")
                 DispatchQueue.main.async {
