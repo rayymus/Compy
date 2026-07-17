@@ -23,7 +23,9 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"traceback\s*\(", "trace"),
     # Explain: "what does this function do", "explain this code", "tell me about this method".
     # Must come BEFORE rationale so "explain this function" → explain, not rationale.
-    (r"\bwhat does (this|the) (code|function|method|class) do\b|\bexplain this (function|method|code|class)\b|\btell me about this (function|method|code|class)\b|\bhow does this (code|function|method|class) work\b", "explain"),
+    # The catch-all \\bexplain\\s+\\w+ matches "explain handle_request" but
+    # uses negative lookahead to exclude "explain this" (rationale's territory).
+    (r"\bwhat does (this|the) (code|function|method|class) do\b|\bexplain this (function|method|code|class)\b|\btell me about this (function|method|code|class)\b|\bhow does this (code|function|method|class) work\b|\bexplain\s+(?!this\b)\w+", "explain"),
     # Graph path: "how are X and Y connected", "path from X to Y".
     (r"\bhow (are|is) .+ and .+ (connected|related)\b|\bpath (from|between)\b", "graph_path"),
     # History / rationale: why something exists, who changed it.
@@ -320,12 +322,18 @@ class RuleBasedParser:
             if re.search(r"\b(this|that|it)\b", q_lower) and re.search(r"\b(used|called|referenced|invoked)\b", q_lower):
                 intent = "references"
                 confidence = max(confidence, 0.85)
-        # explain requires a selection — without one, it's just a fuzzy question.
-        if intent == "explain" and not has_sel:
-            intent = "fuzzy"
-            confidence = 0.50
+        # explain without selection: use the first keyword as the symbol to explain.
+        # (Previously downgraded to fuzzy — now explain works standalone.)
         # Pre-extract keywords once — graph_path needs them for symbol extraction.
         _pre_keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview", "graph_path", "explain") else ()
+        # explain: when no selection, use the first contentful keyword as symbol.
+        # Skip common query-intent words like "explain", "find", "show", etc.
+        _QUERY_WORDS = frozenset({"explain", "find", "show", "search", "tell", "what", "how", "where", "give", "list", "look", "get", "check", "describe"})
+        if intent == "explain" and not has_sel and not symbol:
+            syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw and kw not in _QUERY_WORDS]
+            if syms:
+                symbol = syms[0]
+                confidence = max(confidence, 0.75)
         # graph_path: extract two symbols from keywords (longest non-stopword tokens).
         if intent == "graph_path":
             syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw][:2]

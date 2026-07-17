@@ -58,6 +58,10 @@ final class HotkeyManager {
             var workspaceRoot: String? = nil
             var selectionFile: String? = nil
             var selectionLine: Int? = nil
+            // Start with clipboard text as fallback — will be overridden by
+            // extension's selectedText (the authoritative source).
+            // Clipboard copy without a selection captures the whole line;
+            // the extension accurately reports empty string when nothing is selected.
             var selectionText: String? = selectedText
             let maxStaleness: TimeInterval = 300  // 5 minutes — generous, rejects only abandoned sessions
 
@@ -70,7 +74,10 @@ final class HotkeyManager {
 
                 selectionFile = envelope["file"] as? String
                 selectionLine = envelope["line"] as? Int
-                if let extText = envelope["selectedText"] as? String, !extText.isEmpty {
+                // Always trust the extension's selectedText — it accurately reflects
+                // the user's deliberate selection. Even an empty string (cursor with
+                // no selection) correctly overrides the clipboard's whole-line copy.
+                if let extText = envelope["selectedText"] as? String {
                     selectionText = extText
                 }
                 // Only trust workspaceRoot if the envelope is fresh.

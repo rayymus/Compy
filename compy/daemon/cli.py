@@ -81,16 +81,22 @@ def main(argv: list[str] | None = None) -> int:
 
     historian = GitHistory()
 
-    # Streaming callback: emit intermediate grep candidates before ranking.
-    # The overlay reads this as the first JSON line and shows dimmed results
-    # immediately while the reasoner processes (saving 2-5s of perceived latency).
+    # Streaming callback: run heuristic ranker on candidates immediately so
+    # the overlay shows properly scored results before Ollama returns.
+    # This eliminates the 500ms-2s Ollama delay from perceived latency —
+    # users see instant ranked results (heuristic, ~10ms) while Ollama runs.
+    # When Ollama finishes, the final result overrides with LLM-quality ranking.
+    _heuristic = HeuristicReasoner()
+
     def _stream_candidates(candidates: "tuple[GrepHit, ...]") -> None:
         if not request.stream or not candidates:
             return
+        # Run heuristic ranker for instant scores (10ms, offline).
+        ranked = _heuristic.reason(request.question, candidates)
         hits = [{
             "file": h.file, "line": h.line, "snippet": h.snippet,
-            "score": 0.0, "source": "grep",
-        } for h in candidates]
+            "score": round(h.score, 3), "source": h.source,
+        } for h in ranked]
         print(json.dumps({
             "stream": "candidates", "hits": hits, "count": len(candidates),
         }), flush=True)

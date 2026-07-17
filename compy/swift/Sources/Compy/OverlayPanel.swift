@@ -219,12 +219,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // If already visible, just update state and return.
         guard panel == nil else { return }
 
-        // Start compact (input-bar only) when no results; expand on first query.
-        let initialHeight: CGFloat = (state.phase == .empty) ? 72 : 420
-        // No .nonactivatingPanel — the overlay needs keyboard focus so the
-        // text field is immediately typeable when the hotkey fires.
+        // Cinematic intro: panel starts fullscreen with clear background so the
+        // face can animate at screen center without being clipped by window bounds.
+        // After intro, panel shrinks to top-right 600×72.
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let panel = CompyPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: initialHeight),
+            contentRect: NSRect(x: screenFrame.origin.x, y: screenFrame.origin.y,
+                                width: screenFrame.width, height: screenFrame.height),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: true
         )
@@ -240,32 +241,44 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.delegate = self  // click-outside → dismiss
 
-        // Cinematic intro: panel starts at screen center (face-only, no chrome),
-        // then glides to top-right while the input bar fades in.
-        // NSPanel must be transparent during standalone phase — SwiftUI .clear
-        // isn't enough; the NSWindow itself renders an opaque background.
+        // Cinematic intro: panel starts at final position (top-right) with clear
+        // background. Only the face is visible — close button hidden, input bar
+        // opacity 0. The face pops in big at screen center via an offset, then
+        // glides smoothly to its corner position. After reaching the corner, the
+        // full UI fades in.
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        centerPanel(panel)
+        // Hide the close button during intro — only the face should be visible.
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        // Panel is already fullscreen — no repositioning needed.
+        // Face will appear at screen center (the center of the fullscreen panel).
+        state.introFaceStart = CGPoint(x: screenFrame.width / 2, y: screenFrame.height / 2)
+        // Where the face ends up: the corner position of the final 600×72 panel.
+        // Final panel will be at (maxX-616, maxY-88); face at (61,15) within it
+        // = screen position (maxX-555, maxY-73).
+        // SwiftUI y=0 is at TOP. Final panel at (maxY-88), face at y=15 within it
+        // → screen y = maxY-73 → SwiftUI y = maxY - (maxY-73) = 73.
+        state.introFaceEnd = CGPoint(x: screenFrame.width - 555, y: 73)
         panel.makeKeyAndOrderFront(nil)
-        panel.alphaValue = 0  // fade in
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            panel.animator().alphaValue = 1.0
-        }
-        // Restore NSPanel opacity at same time SwiftUI backgrounds transition (0.5s).
-        // Doing it 50ms earlier avoids a brief transparent flash during the slide.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+
+        // Phase 1: face pops in at 3x → 1x (handled by SwiftUI).
+        // Panel is visible (alpha=1) on clear background — face is the only
+        // visible element since close button is hidden and input bar has opacity 0.
+        // Phase 2: after 0.5s, face glides from screen center to corner.
+        // Phase 3: after 1.0s, reveal background + chrome + contents.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
+            // Shrink panel to final top-right position.
+            let finalW: CGFloat = 600
+            let finalH: CGFloat = 72
+            var frame = panel.frame
+            frame.origin.x = screenFrame.maxX - finalW - 16
+            frame.origin.y = screenFrame.maxY - finalH - 16
+            frame.size.width = finalW
+            frame.size.height = finalH
+            panel.setFrame(frame, display: true, animate: true)
             panel.backgroundColor = NSColor.windowBackgroundColor
             panel.isOpaque = true
-        }
-        // After face appears, glide to top-right.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.45
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
-                self.alignTopRight(panel)
-            }
+            panel.standardWindowButton(.closeButton)?.isHidden = false
         }
         // Briefly activate the app so the panel gets keyboard focus.
         // .accessory policy means no Dock icon — focus returns to the
@@ -402,7 +415,8 @@ final class OverlayState: ObservableObject {
     // MARK: - Face-state system (Compy personality mascot)
 
     /// Minimum time a face must remain visible before transitioning (anti-flicker).
-    private static let faceMinimumDisplay: TimeInterval = 0.55
+    /// Kept at 1.0s to prevent face from changing too rapidly between expressions.
+    private static let faceMinimumDisplay: TimeInterval = 1.0
 
     /// When the current face was first shown — used to enforce minimum display floor.
     private var faceShownAt: Date = Date.distantPast
@@ -474,8 +488,7 @@ final class OverlayState: ObservableObject {
     }
 
     /// Subtle idle animation variants — Compy looks around naturally.
-    /// Triggered every 5-14s during .empty phase with varied glance durations.
-    /// Session 20: more varied glances + occasional double-take + longer holds.
+    /// Triggered every 15-35s during .empty phase — slow, deliberate, never twitchy.
     private var idleShiftTimer: Timer?
 
     func startIdleShifts() {
@@ -483,53 +496,39 @@ final class OverlayState: ObservableObject {
     }
 
     private func scheduleIdleShift() {
-        let interval = TimeInterval.random(in: 5...14)
+        let interval = TimeInterval.random(in: 15...35)
         idleShiftTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             guard let self = self, self.phase == .empty else { return }
-            // Varied idle behaviors — like a real living thing:
-            //  - 35% quick glance (150-300ms): subtle eye dart
-            //  - 25% long look (400-800ms): Compy stares at something
-            //  - 10% double-take: glance → return → glance again
-            //  - 15% mood shift: subtle expression change (bored, curious, etc.)
-            //  - 10% micro-expression: involuntary emotional flash (70-120ms)
-            //  - 5% slow blink: a relaxed, content blink
+            // Slow, deliberate idle behaviors — never twitchy:
+            //  - 40% long look (800ms-1.5s): Compy stares at something
+            //  - 25% do nothing: just pause, natural stillness
+            //  - 15% double-take: glance → return → glance again
+            //  - 10% mood shift: subtle expression change
+            //  - 10% slow blink: a relaxed, content blink
             let roll = Double.random(in: 0...1)
-            if roll < 0.05 {
+            if roll < 0.10 {
                 self.performBlink()  // slow content blink
-            } else if roll < 0.15 {
-                self.performMicroExpression()  // involuntary twitch
-            } else if roll < 0.30 {
+            } else if roll < 0.20 {
                 self.performMoodShift()  // subtle expression change
-            } else if roll < 0.40 {
+            } else if roll < 0.35 {
                 self.performDoubleTake()
-            } else if roll < 0.65 {
+            } else if roll < 0.75 {
                 self.performLongLook()
-            } else {
-                self.performQuickGlance()
             }
+            // else: 25% do nothing — natural stillness
             self.scheduleIdleShift()
         }
     }
 
-    /// Quick subtle glance — Compy's eyes flick to one side briefly.
-    private func performQuickGlance() {
-        let glances = ["<.<", ">.>", ">_>", "<_<", "o.o", "-'-"]
-        let glance = glances.randomElement()!
-        let holdDuration = TimeInterval.random(in: 0.15...0.30)
-        withAnimation(.easeInOut(duration: 0.06)) { eyeDart = glance }
-        DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
-            withAnimation(.easeOut(duration: 0.08)) { self?.eyeDart = nil }
-        }
-    }
 
-    /// Longer stare — Compy fixes gaze on something for a beat.
+    /// Longer stare — Compy fixes gaze on something, slow and deliberate.
     private func performLongLook() {
         let glances = ["O.O", "<.<", ">.>", ">_>"]
         let glance = glances.randomElement()!
-        let holdDuration = TimeInterval.random(in: 0.40...0.80)
-        withAnimation(.easeInOut(duration: 0.10)) { eyeDart = glance }
+        let holdDuration = TimeInterval.random(in: 0.80...1.5)
+        withAnimation(.easeInOut(duration: 0.15)) { eyeDart = glance }
         DispatchQueue.main.asyncAfter(deadline: .now() + holdDuration) { [weak self] in
-            withAnimation(.easeOut(duration: 0.15)) { self?.eyeDart = nil }
+            withAnimation(.easeOut(duration: 0.2)) { self?.eyeDart = nil }
         }
     }
 
@@ -547,24 +546,6 @@ final class OverlayState: ObservableObject {
                     withAnimation(.easeOut(duration: 0.08)) { self?.eyeDart = nil }
                 }
             }
-        }
-    }
-
-    /// Micro-expression: a brief emotional flash (70-120ms).
-    /// Simulates an involuntary twitch, realization, or tiny reaction.
-    /// Token-based invalidation prevents the flash from reappearing after
-    /// a concurrent blink finishes (which takes priority in displayedFace).
-    private var microExpressionToken: Int = 0
-
-    private func performMicroExpression() {
-        let flashes = [">_<", "o_o", ">*<", ">,<", "O_O", ">w<"]
-        let flash = flashes.randomElement()!
-        let token = microExpressionToken + 1
-        microExpressionToken = token
-        withAnimation(.easeInOut(duration: 0.04)) { eyeDart = flash }
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int.random(in: 70...120))) { [weak self] in
-            guard let self = self, self.microExpressionToken == token else { return }
-            withAnimation(.easeOut(duration: 0.06)) { self.eyeDart = nil }
         }
     }
 
@@ -586,6 +567,13 @@ final class OverlayState: ObservableObject {
     /// Bouncy intro: starts at 3.0, springs to 1.0 on first appear.
     /// Reset to 3.0 on each show() so every hotkey press gets the pop-in.
     @Published var panelScale: CGFloat = 3.0
+
+    /// Start position for the intro face — screen center (center of fullscreen panel).
+    /// Set by OverlayController.show() before the panel appears.
+    var introFaceStart: CGPoint = .zero
+    /// End position for the intro face — corner of the final top-right panel.
+    /// The face glides from introFaceStart to introFaceEnd during the sliding phase.
+    var introFaceEnd: CGPoint = .zero
 
     /// Scale: 1.0 = normal, dips to 0.92 during morph dissolve then eases back.
     @Published var faceScale: CGFloat = 1.0
@@ -710,9 +698,11 @@ final class OverlayState: ObservableObject {
     }
 
     /// Stop the processing pulse (called when results arrive).
-    /// Resets faceTransitioning so the pending morph to results/noMatch face can proceed.
+    /// Resets faceTransitioning and faceShownAt so the pending morph to results/noMatch
+    /// face fires immediately — even for fast queries that complete in < 1s.
     func stopProcessingPulse() {
         faceTransitioning = false
+        faceShownAt = Date.distantPast  // allow immediate transition to results face
         stopDartTimer()
         eyeDart = nil
         withAnimation(.easeOut(duration: 0.25)) {
@@ -1003,23 +993,25 @@ struct OverlayView: View {
                 compyFace
             }
 
-            // Cinematic intro: Phase 1 — standalone face at center (no panel chrome).
-            // Phase 2 — face glides to corner as panel slides to top-right.
-            // Single face with animatable position and size so it glides smoothly.
+            // Cinematic intro: panel is fullscreen (clear bg) so the face can animate
+            // freely across the entire screen without being clipped by window bounds.
+            // Phase 1: face pops in 3x→1x at screen center (center of fullscreen panel).
+            // Phase 2: face glides from center to corner position.
+            // Phase 3: intro done — panel shrinks to top-right, full UI reveals.
             if state.phase == .empty && introPhase != .done {
                 faceView(size: introFaceSize)
                     .scaleEffect(introPhase == .standalone ? introFaceScale : 1.0)
-                    .position(introFacePosition)
+                    .position(introPhase == .sliding ? state.introFaceEnd : state.introFaceStart)
                     .onAppear {
                         // Phase 1: face pops in big with spring.
+                        // Position is already correct via state.introFaceStart (no flash).
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
                             introFaceScale = 1.0
                         }
-                        // Phase 2: face glides to corner as panel moves.
+                        // Phase 2: face glides from screen center to corner.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             withAnimation(.easeInOut(duration: 0.45)) {
                                 introPhase = .sliding
-                                introFacePosition = CGPoint(x: 61, y: 15)
                                 introFaceSize = 18
                             }
                         }
@@ -1033,35 +1025,9 @@ struct OverlayView: View {
                     }
             }
 
-            // After intro: "Press Cmd+Shift+Space to ask about your code".
-            if state.phase == .empty && introPhase == .done {
-                VStack(spacing: 14) {
-                    HStack(spacing: 6) {
-                        Text("Press").foregroundColor(.secondary)
-                        HStack(spacing: 2) {
-                            Image(systemName: "command")
-                            Image(systemName: "shift")
-                            Text("Space")
-                        }
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color(NSColor.quaternaryLabelColor))
-                        .cornerRadius(4)
-                        Text("to ask about your code").foregroundColor(.secondary)
-                    }
-                    .font(.system(size: 13))
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
 
-                    Text("Esc or X to dismiss")
-                        .font(.system(size: 11))
-                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
-                        .transition(.opacity)
-                }
-                .frame(width: 600)
-            }
         }
-        .background(introPhase == .standalone ? Color.clear : Color(NSColor.windowBackgroundColor))
+        .background(introPhase == .done ? Color(NSColor.windowBackgroundColor) : Color.clear)
         .onChange(of: state.phase) { _, newPhase in
             guard let window = NSApp.windows.first(where: { $0 is CompyPanel }) else { return }
             let targetHeight: CGFloat = (newPhase == .empty) ? 72 : 420
@@ -1263,7 +1229,8 @@ struct OverlayView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-        .background(introPhase == .standalone ? Color.clear : Color(NSColor.controlBackgroundColor))
+        .background(introPhase == .done ? Color(NSColor.controlBackgroundColor) : Color.clear)
+        .opacity(introPhase == .done ? 1 : 0)
     }
 
     // MARK: - Mic Button (whisper.cpp STT)
@@ -1400,14 +1367,14 @@ struct OverlayView: View {
         return fallbackRoot
     }
 
-    /// Spawn whisper.cpp recording: burst-capture 4s of mic audio,
+    /// Spawn whisper.cpp recording: burst-capture 3s of mic audio,
     /// transcribe, set text. Push-to-talk model — click to record, click to stop.
-    /// Continuous: restarts after each burst with 400ms backoff.
+    /// Continuous: restarts after each burst with 150ms backoff for responsive feel.
     private func startRecording() {
         state.recognizedTextPrefix = state.text
         state.isRecording = true
         state.sttError = nil
-        state.sttPhase = "Recording 4s…"
+        state.sttPhase = "Recording…"
         _runWhisperBurst()
     }
 
@@ -1469,11 +1436,15 @@ struct OverlayView: View {
                         }
                     }
 
-                    // Restart for continuous listening
+                    // Restart for continuous listening.
+                    // Fast restart (50ms) if previous burst was empty (user may not
+                    // have started speaking yet). Normal 150ms backoff otherwise.
+                    let wasEmpty = state.text.isEmpty || state.text == state.recognizedTextPrefix
                     if state.isRecording {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(400)) {
+                        let backoff = wasEmpty ? 50 : 150
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(backoff)) {
                             guard state.isRecording else { return }
-                            state.sttPhase = "Recording 4s…"
+                            state.sttPhase = "Recording…"
                             self._runWhisperBurst()
                         }
                     } else {
@@ -1767,8 +1738,6 @@ struct OverlayView: View {
     @State private var introFaceScale: CGFloat = 3.0
     /// Current cinematic intro phase — .standalone → .sliding → .done.
     @State private var introPhase: IntroPhase = .standalone
-    /// Animated position: center (300, 36) → corner (~61, 15).
-    @State private var introFacePosition: CGPoint = CGPoint(x: 300, y: 36)
     /// Animated size: 48pt → 18pt.
     @State private var introFaceSize: CGFloat = 48
 
