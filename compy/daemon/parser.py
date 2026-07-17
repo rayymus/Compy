@@ -45,8 +45,8 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"\bwhat('s| is) unused\b|\bdead code\b|\bwhat isn('t|ot) (being |)used\b|\bfind unused\b|\bunreferenced\b", "dead_code"),
     # Overview / catch-up Q&A: broad repo questions about architecture, flow, structure.
     (r"\bhow does\b|\bgive me an overview\b|\bexplain the (codebase|repo|architecture|structure)\b|\bhow (is|are)\b.*\b(organized|structured|laid out)\b|\bwhat (is|are) the (main|key) (modules?|components?|parts?)\b", "overview"),
-    # Format / refactor: "format this file", "format the code", "/undo".
-    (r"\bformat (this|the) (file|code|selection)\b|\b/undo\b", "format"),
+    # Format / refactor: "format this file", "format the code", "/undo", "/confirm".
+    (r"\bformat (this|the) (file|code|selection)\b|^/(?:undo|confirm)\b", "format"),
     # Fuzzy: catch-all for natural-language search.
     (r"\bwhere is\b|\bfind\b|\bwhat (does|is|handles?)\b", "fuzzy"),
 )
