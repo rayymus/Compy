@@ -107,33 +107,28 @@ struct CompyMessagePool {
 
 // MARK: - Editor Opener
 
-/// Resolves the best available editor CLI to open a file at a given line.
+/// Opens a file at a given line in the user's editor.
+///
+/// Uses the editor's registered URL scheme (e.g. `antigravity-ide://file/...`)
+/// via NSWorkspace — this talks directly to the existing editor instance via
+/// LaunchServices, bypassing the Electron CLI subprocess that causes the
+/// temporary-window flash.  Falls back to the CLI if the URL scheme is
+/// unavailable or fails.
 ///
 /// `basePath` must be set once at launch to the project root so that relative
-/// file paths from the daemon (e.g. `compy/daemon/orchestrator.py`) are resolved
-/// to absolute paths before being passed to `agy-ide -g`.
+/// file paths from the daemon are resolved to absolute paths.
 struct EditorOpener {
-    /// Authoritative project root — MUST be set by CompAppDelegate on launch.
-    /// Defaults to "/" so uninitialized usage doesn't silently create files
-    /// in a user directory; relative paths resolve to root instead.
     static var basePath: String = "/"
 
-    /// Keep a reference to the editor subprocess so it isn't deallocated
-    /// before the goto command completes. Serial queue protects against
-    /// concurrent mutations from the background dispatch and terminationHandler
-    /// (which fires on an arbitrary queue per Apple docs).
-    private static var pendingEditors: [Process] = []
-    private static let pendingLock = NSLock()
+    /// Editor URL schemes in preference order (agy-ide, cursor, code).
+    private static let urlSchemes: [(scheme: String, bundleID: String, cliPath: String)] = [
+        ("antigravity-ide", "com.google.antigravity-ide",
+         "\(NSHomeDirectory())/.antigravity-ide/antigravity-ide/bin/agy-ide"),
+        ("cursor", "com.cursor.Cursor", "/usr/local/bin/cursor"),
+        ("vscode", "com.microsoft.VSCode", "/usr/local/bin/code"),
+    ]
 
-    /// Ordered candidates: agy-ide (Antigravity 1.x), cursor, code.
-    /// Each is tried in order; first one that exists and launches cleanly wins.
-    /// Final fallback: NSWorkspace.open (file only, no line jump).
-    ///
-    /// Runs the editor CLI on a background queue so the overlay UI stays
-    /// responsive and no temporary editor window flashes on screen.
     static func open(file: String, line: Int) {
-        // Resolve relative paths against the project root so the editor CLI
-        // always receives an absolute path regardless of its current workspace.
         let resolved: String
         if file.hasPrefix("/") {
             resolved = file
@@ -142,38 +137,31 @@ struct EditorOpener {
                            relativeTo: URL(fileURLWithPath: basePath)).path
         }
 
-        let home = NSHomeDirectory()
-        let candidates = [
-            "\(home)/.antigravity-ide/antigravity-ide/bin/agy-ide",
-            "/usr/local/bin/cursor",
-            "/usr/local/bin/code",
-        ]
+        // Strategy 1: URL scheme — talks directly to existing editor instance.
+        // Zero subprocess, zero Electron helper, zero flash.
+        let encodedPath = resolved.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? resolved
+        for entry in urlSchemes {
+            guard let url = URL(string: "\(entry.scheme)://file/\(encodedPath):\(line)") else { continue }
+            NSWorkspace.shared.open(url)
+            return
+        }
+
+        // Strategy 2: CLI fallback — only reached if no URL scheme is registered.
         DispatchQueue.global(qos: .userInitiated).async {
-            for path in candidates {
+            for entry in urlSchemes {
+                let path = entry.cliPath
                 guard FileManager.default.isExecutableFile(atPath: path) else { continue }
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: path)
                 proc.arguments = ["-r", "-g", "\(resolved):\(line)"]
                 do {
-                    pendingLock.lock()
-                    pendingEditors.append(proc)
-                    pendingLock.unlock()
                     try proc.run()
-                    proc.terminationHandler = { [weak proc] _ in
-                        guard let proc = proc else { return }
-                        pendingLock.lock()
-                        pendingEditors.removeAll { $0 === proc }
-                        pendingLock.unlock()
-                    }
-                    return  // first match wins
+                    return
                 } catch {
-                    pendingLock.lock()
-                    pendingEditors.removeAll { $0 === proc }
-                    pendingLock.unlock()
                     continue
                 }
             }
-            // Fallback: no editor CLI found — open the file in the default app.
+            // Final fallback: open the file in the default app.
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(URL(fileURLWithPath: resolved))
             }
@@ -2446,7 +2434,7 @@ struct ResultRow: View {
             }
         }
         .onTapGesture {
-            EditorOpener.open(file: hit.file, line: hit.line)
+            OverlayController.shared.hide(); EditorOpener.open(file: hit.file, line: hit.line)
         }
     }
 
