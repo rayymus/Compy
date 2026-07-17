@@ -240,17 +240,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.delegate = self  // click-outside → dismiss
         alignTopRight(panel)
-        // Position panel at screen center for bouncy intro, then animate to top-right.
-        centerPanel(panel)
         panel.makeKeyAndOrderFront(nil)
-        // Animate from center to top-right simultaneously with the scale spring.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.4
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
-                self.alignTopRight(panel)
-            }
-        }
         // Briefly activate the app so the panel gets keyboard focus.
         // .accessory policy means no Dock icon — focus returns to the
         // previous app when the user clicks outside (windowDidResignKey).
@@ -282,17 +272,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             if panel.isKeyWindow {
                 hide()
             } else {
-                // Position panel at screen center for bouncy intro, then animate to top-right.
-        centerPanel(panel)
-        panel.makeKeyAndOrderFront(nil)
-        // Animate from center to top-right simultaneously with the scale spring.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.4
-                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
-                self.alignTopRight(panel)
-            }
-        }
+                panel.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
             }
         } else {
@@ -319,14 +299,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.setFrameOrigin(NSPoint(x: xOrigin, y: yOrigin))
     }
 
-    private func centerPanel(_ panel: CompyPanel) {
-        guard let screen = NSScreen.main else { return }
-        let screenFrame = screen.visibleFrame
-        let panelSize = panel.frame.size
-        let xOrigin = screenFrame.midX - panelSize.width / 2
-        let yOrigin = screenFrame.midY - panelSize.height / 2
-        panel.setFrameOrigin(NSPoint(x: xOrigin, y: yOrigin))
-    }
+
 }
 
 // MARK: - NSPanel subclass
@@ -709,8 +682,7 @@ final class OverlayState: ObservableObject {
         eyeDart = nil
         withAnimation(.easeOut(duration: 0.25)) {
             faceOpacity = 1.0
-            panelScale = 3.0
-        faceScale = 1.0
+            faceScale = 1.0
         }
     }
 
@@ -921,7 +893,6 @@ final class OverlayState: ObservableObject {
         winkRightSide = false
         eyeDart = nil
         reactionFace = nil  // clear click reaction
-        panelScale = 3.0
         faceScale = 1.0
         faceOpacity = 1.0
         faceFloatOffset = 0
@@ -996,12 +967,6 @@ struct OverlayView: View {
             compyFace
         }
         .background(Color(NSColor.windowBackgroundColor))
-        .scaleEffect(state.panelScale)
-        .onAppear {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.65)) {
-                state.panelScale = 1.0
-            }
-        }
         .onChange(of: state.phase) { _, newPhase in
             guard let window = NSApp.windows.first(where: { $0 is CompyPanel }) else { return }
             let targetHeight: CGFloat = (newPhase == .empty) ? 72 : 420
@@ -1054,7 +1019,7 @@ struct OverlayView: View {
     /// Per clarifications.md: ONE face at a time — either corner or content area.
     @ViewBuilder
     private var compyFace: some View {
-        if state.phase == .empty || state.phase == .noMatch || state.phase == .refactorProposal {
+        if (state.phase == .empty && introDone) || state.phase == .noMatch || state.phase == .refactorProposal {
             faceView(size: 18)
                 .offset(y: state.faceFloatOffset)
                 .padding(.top, 6)
@@ -1465,32 +1430,51 @@ struct OverlayView: View {
 
     private var emptyState: some View {
         VStack(spacing: 14) {
-            // No face here — the corner badge in the ZStack overlay is the sole face.
-            // Per clarifications.md: ONE face at a time, not doubling.
-            
-            HStack(spacing: 6) {
-                Text("Press").foregroundColor(.secondary)
-                HStack(spacing: 2) {
-                    Image(systemName: "command")
-                    Image(systemName: "shift")
-                    Text("Space")
+            if !introDone {
+                // Compy face pops in BIG and bouncy, then settles before the input bar appears.
+                faceView(size: 48)
+                    .scaleEffect(introFaceScale)
+                    .padding(.top, 16)
+                    .transition(.opacity)
+                    .onAppear {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                            introFaceScale = 1.0
+                        }
+                        // After the bounce settles, show the input hint.
+                        // 0.5s > 0.4s spring — ensures face has settled.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                introDone = true
+                            }
+                            state.startIdleFloat()
+                        }
+                    }
+            } else {
+                HStack(spacing: 6) {
+                    Text("Press").foregroundColor(.secondary)
+                    HStack(spacing: 2) {
+                        Image(systemName: "command")
+                        Image(systemName: "shift")
+                        Text("Space")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color(NSColor.quaternaryLabelColor))
+                    .cornerRadius(4)
+                    Text("to ask about your code").foregroundColor(.secondary)
                 }
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color(NSColor.quaternaryLabelColor))
-                .cornerRadius(4)
-                Text("to ask about your code").foregroundColor(.secondary)
-            }
-            .font(.system(size: 13))
+                .font(.system(size: 13))
+                .transition(.opacity.combined(with: .move(edge: .bottom).combined(with: .opacity)))
 
-            Text("Esc or X to dismiss")
-                .font(.system(size: 11))
-                .foregroundColor(Color(NSColor.tertiaryLabelColor))
-                .padding(.top, 4)
+                Text("Esc or X to dismiss")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                    .padding(.top, 4)
+                    .transition(.opacity)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { state.startIdleFloat() }
         .onDisappear { state.stopIdleFloat() }
     }
 
@@ -1727,6 +1711,11 @@ struct OverlayView: View {
             headerIsRanking = newValue.hasPrefix("Ranking ")
         }
     }
+
+    /// Bouncy intro: face starts at 3x, springs to 1x before input bar appears.
+    @State private var introFaceScale: CGFloat = 3.0
+    /// True after the face bounce settles — reveals the input hints.
+    @State private var introDone = false
 
     private var copyIcon: String {
         didCopy ? "checkmark" : "square.on.square"
