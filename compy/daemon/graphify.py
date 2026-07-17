@@ -421,9 +421,50 @@ class GraphQuerier:
             "imports": self.query_imports,
             "subclasses": self.query_subclasses,
             "blast_radius": self.query_blast_radius,
+            "path": self.query_path,
         }
         method = mapping.get(intent, self.query_calls)
         return method(symbol)
+
+    def query_path(self, source_symbol: str, target_symbol: str = "") -> tuple[GrepHit, ...]:
+        """Shortest path between two symbols in the call graph.
+
+        When called via the generic `query(symbol, intent="path")`, the symbol
+        string encodes both endpoints as "source::target".  Direct callers should
+        pass source_symbol and target_symbol explicitly.
+        """
+        if self._graph is None:
+            return ()
+        # Support both encoding styles: "src::tgt" from orchestrator, or explicit args.
+        if "::" in source_symbol and not target_symbol:
+            parts = source_symbol.split("::", 1)
+            source_symbol, target_symbol = parts[0], parts[1]
+        src = _resolve_node(source_symbol, self._graph)
+        tgt = _resolve_node(target_symbol, self._graph)
+        if src is None or tgt is None:
+            return ()
+        if src == tgt:
+            return ()  # Same symbol — no path to show.
+        try:
+            path = nx.shortest_path(self._graph, source=src, target=tgt)
+            # Build a compact chain: "func1 → func2 → func3"
+            names: list[str] = []
+            for n in path:
+                data = self._graph.nodes.get(n, {})
+                short = n.rsplit("::", 1)[-1]
+                names.append(short)
+            path_str = " → ".join(names)
+            first_node = self._graph.nodes[path[0]]
+            file = first_node.get("file", "")
+            line = first_node.get("line", 0)
+            snippet = first_node.get("snippet", path_str)[:300]
+            return (GrepHit(
+                file=file, line=line, column=0,
+                snippet=f"Path ({len(path) - 1} hops): {path_str}\
+{snippet}",
+            ),)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return ()
 
     def query_blast_radius(self, symbol: str) -> tuple[GrepHit, ...]:
         """What depends on this symbol? Returns callers + importers + subclasses."""

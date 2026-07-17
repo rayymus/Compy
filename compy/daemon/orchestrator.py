@@ -199,6 +199,27 @@ def _evaluate(
     if parsed.intent in ("convention", "dedup"):
         parsed = replace(parsed, intent="fuzzy")
 
+    # --- Graph path: "how are X and Y connected" — shortest path in call graph ---
+    if parsed.intent == "graph_path" and grapher is not None:
+        try:
+            grapher.load(workspace)
+        except ReasonerUnavailable:
+            pass
+        else:
+            symbol = parsed.symbol
+            if symbol and "::" in symbol:
+                src, tgt = symbol.split("::", 1)
+                candidates = grapher.query_path(src, tgt)
+                if candidates:
+                    hits = tuple(
+                        RankedHit(file=h.file, line=h.line, snippet=h.snippet,
+                                  score=1.0, source="graph",
+                                  structural_context=f"{src} → {tgt}")
+                        for h in candidates
+                    )
+                    return parsed, hits, False, None
+        parsed = replace(parsed, intent="fuzzy")
+
     # --- Explain path: "what does this function do?" with selection context ---
     if parsed.intent == "explain":
         if grapher is not None:
@@ -472,6 +493,75 @@ def _enrich_candidates_for_ranking(
             snippet=c.snippet, symbol=c.symbol, context=ctx,
         ))
     return tuple(enriched)
+
+
+def _build_explain_result(
+    symbol: str, grapher: Grapher, selection_file: str, workspace: str
+) -> tuple[RankedHit, ...]:
+    """Build a micro-explanation: definition + callers + callees for a symbol.
+
+    Returns RankedHits that show what the function is, who calls it, and what it
+    calls — a compact structural summary without needing an LLM.
+    """
+    graph = grapher._graph  # type: ignore[attr-defined]
+    if graph is None:
+        return ()
+
+    # Find the definition node in the graph.
+    node_id: str | None = None
+    for n in graph.nodes:
+        if n.endswith(f"::{symbol}"):
+            node_id = n
+            break
+    if node_id is None:
+        lower = symbol.lower()
+        for n in graph.nodes:
+            if n.lower().endswith(f"::{lower}"):
+                node_id = n
+                break
+
+    hits: list[RankedHit] = []
+
+    if node_id:
+        node_data = graph.nodes[node_id]
+        file = node_data.get("file", selection_file)
+        line = node_data.get("line", 1)
+        snippet = node_data.get("snippet", "")
+        if not snippet:
+            snippet = _read_line(file, line, workspace)
+        kind = node_data.get("kind", "function")
+        hits.append(RankedHit(
+            file=file, line=line,
+            snippet=f"[{kind}] {snippet}",
+            score=1.0, source="graph",
+            structural_context="Definition",
+        ))
+
+    # Callers — who calls this symbol.
+    try:
+        callers = grapher.query(symbol, intent="callers")
+        for c in callers[:3]:
+            hits.append(RankedHit(
+                file=c.file, line=c.line, snippet=c.snippet,
+                score=0.85, source="graph",
+                structural_context="Called by",
+            ))
+    except Exception:
+        pass
+
+    # Callees — what this symbol calls.
+    try:
+        callees = grapher.query(symbol, intent="calls")
+        for c in callees[:3]:
+            hits.append(RankedHit(
+                file=c.file, line=c.line, snippet=c.snippet,
+                score=0.8, source="graph",
+                structural_context="Calls",
+            ))
+    except Exception:
+        pass
+
+    return tuple(hits)
 
 
 def _filter_overview_by_keywords(

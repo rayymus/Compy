@@ -21,6 +21,11 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"file\s+\"[^\"]+\"\s*[,:]\s*(?:line\s+)?\d+", "trace"),
     (r"\bat\s+\S+[(:]\d+", "trace"),
     (r"traceback\s*\(", "trace"),
+    # Explain: "what does this function do", "explain this code", "tell me about this method".
+    # Must come BEFORE rationale so "explain this function" → explain, not rationale.
+    (r"\bwhat does (this|the) (code|function|method|class) do\b|\bexplain this (function|method|code|class)\b|\btell me about this (function|method|code|class)\b|\bhow does this (code|function|method|class) work\b", "explain"),
+    # Graph path: "how are X and Y connected", "path from X to Y".
+    (r"\bhow (are|is) .+ and .+ (connected|related)\b|\bpath (from|between)\b", "graph_path"),
     # History / rationale: why something exists, who changed it.
     (r"\bwhy was\b|\bwho (added|changed|wrote)\b|\bwhat commit\b|\bgit blame\b|\bgit log\b|\bcommit (message|history)\b", "history"),
     (r"\bwhy (does|is)\b.*\b(exist|here|this|that)\b|\breason for\b|\bexplain this\b|\bwhy would\b", "rationale"),
@@ -309,7 +314,22 @@ class RuleBasedParser:
             if re.search(r"\b(this|that|it)\b", q_lower) and re.search(r"\b(used|called|referenced|invoked)\b", q_lower):
                 intent = "references"
                 confidence = max(confidence, 0.85)
-        keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview") else ()
+        # explain requires a selection — without one, it's just a fuzzy question.
+        if intent == "explain" and not has_sel:
+            intent = "fuzzy"
+            confidence = 0.50
+        # Pre-extract keywords once — graph_path needs them for symbol extraction.
+        _pre_keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview", "graph_path", "explain") else ()
+        # graph_path: extract two symbols from keywords (longest non-stopword tokens).
+        if intent == "graph_path":
+            syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw][:2]
+            if len(syms) >= 2:
+                symbol = f"{syms[0]}::{syms[1]}"
+                confidence = max(confidence, 0.75)
+            else:
+                intent = "fuzzy"
+                confidence = 0.45
+        keywords = _pre_keywords
         # Gap 2 (Session 20): Inject the selection symbol into fuzzy keywords.
         # The user selected a piece of code — the symbol from that code should
         # be the first thing we search for. Without this, the fuzzy path

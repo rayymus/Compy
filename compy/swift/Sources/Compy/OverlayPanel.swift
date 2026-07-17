@@ -240,7 +240,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.delegate = self  // click-outside → dismiss
         alignTopRight(panel)
+        // Position panel at screen center for bouncy intro, then animate to top-right.
+        centerPanel(panel)
         panel.makeKeyAndOrderFront(nil)
+        // Animate from center to top-right simultaneously with the scale spring.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.4
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+                self.alignTopRight(panel)
+            }
+        }
         // Briefly activate the app so the panel gets keyboard focus.
         // .accessory policy means no Dock icon — focus returns to the
         // previous app when the user clicks outside (windowDidResignKey).
@@ -272,7 +282,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
             if panel.isKeyWindow {
                 hide()
             } else {
-                panel.makeKeyAndOrderFront(nil)
+                // Position panel at screen center for bouncy intro, then animate to top-right.
+        centerPanel(panel)
+        panel.makeKeyAndOrderFront(nil)
+        // Animate from center to top-right simultaneously with the scale spring.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.4
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1.0)
+                self.alignTopRight(panel)
+            }
+        }
                 NSApp.activate(ignoringOtherApps: true)
             }
         } else {
@@ -296,6 +316,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let panelSize = panel.frame.size
         let xOrigin = screenFrame.maxX - panelSize.width - 16
         let yOrigin = screenFrame.maxY - panelSize.height - 16
+        panel.setFrameOrigin(NSPoint(x: xOrigin, y: yOrigin))
+    }
+
+    private func centerPanel(_ panel: CompyPanel) {
+        guard let screen = NSScreen.main else { return }
+        let screenFrame = screen.visibleFrame
+        let panelSize = panel.frame.size
+        let xOrigin = screenFrame.midX - panelSize.width / 2
+        let yOrigin = screenFrame.midY - panelSize.height / 2
         panel.setFrameOrigin(NSPoint(x: xOrigin, y: yOrigin))
     }
 }
@@ -542,6 +571,10 @@ final class OverlayState: ObservableObject {
         eyeDart = nil
     }
 
+    /// Bouncy intro: starts at 3.0, springs to 1.0 on first appear.
+    /// Reset to 3.0 on each show() so every hotkey press gets the pop-in.
+    @Published var panelScale: CGFloat = 3.0
+
     /// Scale: 1.0 = normal, dips to 0.92 during morph dissolve then eases back.
     @Published var faceScale: CGFloat = 1.0
 
@@ -670,7 +703,8 @@ final class OverlayState: ObservableObject {
         eyeDart = nil
         withAnimation(.easeOut(duration: 0.25)) {
             faceOpacity = 1.0
-            faceScale = 1.0
+            panelScale = 3.0
+        faceScale = 1.0
         }
     }
 
@@ -881,6 +915,7 @@ final class OverlayState: ObservableObject {
         winkRightSide = false
         eyeDart = nil
         reactionFace = nil  // clear click reaction
+        panelScale = 3.0
         faceScale = 1.0
         faceOpacity = 1.0
         faceFloatOffset = 0
@@ -951,6 +986,12 @@ struct OverlayView: View {
             compyFace
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .scaleEffect(state.panelScale)
+        .onAppear {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.65)) {
+                state.panelScale = 1.0
+            }
+        }
         .onChange(of: state.phase) { _, newPhase in
             guard let window = NSApp.windows.first(where: { $0 is CompyPanel }) else { return }
             let targetHeight: CGFloat = (newPhase == .empty) ? 72 : 420
