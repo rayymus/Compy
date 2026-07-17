@@ -239,8 +239,34 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.contentView = NSHostingView(rootView: OverlayView().environmentObject(state))
         panel.isReleasedWhenClosed = false
         panel.delegate = self  // click-outside → dismiss
-        alignTopRight(panel)
+
+        // Cinematic intro: panel starts at screen center (face-only, no chrome),
+        // then glides to top-right while the input bar fades in.
+        // NSPanel must be transparent during standalone phase — SwiftUI .clear
+        // isn't enough; the NSWindow itself renders an opaque background.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        centerPanel(panel)
         panel.makeKeyAndOrderFront(nil)
+        panel.alphaValue = 0  // fade in
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = 1.0
+        }
+        // Restore NSPanel opacity at same time SwiftUI backgrounds transition (0.5s).
+        // Doing it 50ms earlier avoids a brief transparent flash during the slide.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            panel.backgroundColor = NSColor.windowBackgroundColor
+            panel.isOpaque = true
+        }
+        // After face appears, glide to top-right.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.45
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1.0)
+                self.alignTopRight(panel)
+            }
+        }
         // Briefly activate the app so the panel gets keyboard focus.
         // .accessory policy means no Dock icon — focus returns to the
         // previous app when the user clicks outside (windowDidResignKey).
@@ -288,6 +314,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // even when focus returns to the editor.
         // The user explicitly wants: "Clicking off (blur) of the overlay
         // should not remove the search or stop Compy."
+    }
+
+    private func centerPanel(_ panel: CompyPanel) {
+        guard let screen = NSScreen.main else { return }
+        let screenFrame = screen.visibleFrame
+        let panelSize = panel.frame.size
+        let xOrigin = screenFrame.midX - panelSize.width / 2
+        let yOrigin = screenFrame.midY - panelSize.height / 2
+        panel.setFrameOrigin(NSPoint(x: xOrigin, y: yOrigin))
     }
 
     private func alignTopRight(_ panel: CompyPanel) {
@@ -963,33 +998,43 @@ struct OverlayView: View {
             .frame(minHeight: 72)
 
             // Compy face — top-left, mirrors the macOS close button.
-            // Always visible regardless of compact/expanded state.
-            compyFace
+            // Only visible after cinematic intro completes.
+            if introPhase == .done {
+                compyFace
+            }
 
-            // Intro animation: Compy's face pops in BIG at the center of the panel,
-            // scales from 3x → 1x with spring, then dissolves. Lives in the ZStack
-            // overlay so it's never clipped by the 72px window or VStack layout.
-            if state.phase == .empty && !introDone {
-                faceView(size: 48)
-                    .scaleEffect(introFaceScale)
-                    .position(x: 300, y: 36)  // centered in the 600×72 input bar
-                    .transition(.opacity)
+            // Cinematic intro: Phase 1 — standalone face at center (no panel chrome).
+            // Phase 2 — face glides to corner as panel slides to top-right.
+            // Single face with animatable position and size so it glides smoothly.
+            if state.phase == .empty && introPhase != .done {
+                faceView(size: introFaceSize)
+                    .scaleEffect(introPhase == .standalone ? introFaceScale : 1.0)
+                    .position(introFacePosition)
                     .onAppear {
+                        // Phase 1: face pops in big with spring.
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
                             introFaceScale = 1.0
                         }
+                        // Phase 2: face glides to corner as panel moves.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            withAnimation(.easeInOut(duration: 0.45)) {
+                                introPhase = .sliding
+                                introFacePosition = CGPoint(x: 61, y: 15)
+                                introFaceSize = 18
+                            }
+                        }
+                        // Phase 3: intro complete — reveal full UI.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             withAnimation(.easeOut(duration: 0.25)) {
-                                introDone = true
+                                introPhase = .done
                             }
                             state.startIdleFloat()
                         }
                     }
             }
 
-            // After intro: "Press Cmd+Shift+Space to ask about your code" —
-            // in the ZStack so it isn't trapped in unreachable emptyState.
-            if state.phase == .empty && introDone {
+            // After intro: "Press Cmd+Shift+Space to ask about your code".
+            if state.phase == .empty && introPhase == .done {
                 VStack(spacing: 14) {
                     HStack(spacing: 6) {
                         Text("Press").foregroundColor(.secondary)
@@ -1016,7 +1061,7 @@ struct OverlayView: View {
                 .frame(width: 600)
             }
         }
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(introPhase == .standalone ? Color.clear : Color(NSColor.windowBackgroundColor))
         .onChange(of: state.phase) { _, newPhase in
             guard let window = NSApp.windows.first(where: { $0 is CompyPanel }) else { return }
             let targetHeight: CGFloat = (newPhase == .empty) ? 72 : 420
@@ -1069,7 +1114,7 @@ struct OverlayView: View {
     /// Per clarifications.md: ONE face at a time — either corner or content area.
     @ViewBuilder
     private var compyFace: some View {
-        if (state.phase == .empty && introDone) || state.phase == .noMatch || state.phase == .refactorProposal {
+        if (state.phase == .empty && introPhase == .done) || state.phase == .noMatch || state.phase == .refactorProposal {
             faceView(size: 18)
                 .offset(y: state.faceFloatOffset)
                 .padding(.top, 6)
@@ -1218,7 +1263,7 @@ struct OverlayView: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 16)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(introPhase == .standalone ? Color.clear : Color(NSColor.controlBackgroundColor))
     }
 
     // MARK: - Mic Button (whisper.cpp STT)
@@ -1716,10 +1761,16 @@ struct OverlayView: View {
         }
     }
 
+    /// Cinematic intro phases.
+    enum IntroPhase { case standalone, sliding, done }
     /// Bouncy intro: face starts at 3x, springs to 1x before input bar appears.
     @State private var introFaceScale: CGFloat = 3.0
-    /// True after the face bounce settles — reveals the input hints.
-    @State private var introDone = false
+    /// Current cinematic intro phase — .standalone → .sliding → .done.
+    @State private var introPhase: IntroPhase = .standalone
+    /// Animated position: center (300, 36) → corner (~61, 15).
+    @State private var introFacePosition: CGPoint = CGPoint(x: 300, y: 36)
+    /// Animated size: 48pt → 18pt.
+    @State private var introFaceSize: CGFloat = 48
 
     private var copyIcon: String {
         didCopy ? "checkmark" : "square.on.square"
