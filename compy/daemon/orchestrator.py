@@ -199,6 +199,23 @@ def _evaluate(
     if parsed.intent in ("convention", "dedup"):
         parsed = replace(parsed, intent="fuzzy")
 
+    # --- Explain path: "what does this function do?" with selection context ---
+    if parsed.intent == "explain":
+        if grapher is not None:
+            try:
+                grapher.load(workspace)
+            except ReasonerUnavailable:
+                pass  # Fall through to fuzzy.
+            else:
+                symbol = parsed.symbol or _first_keyword(parsed.keywords)
+                if symbol:
+                    # Show the function's own definition + callers + callees.
+                    hits = _build_explain_result(symbol, grapher, sel_file or "", workspace)
+                    if hits:
+                        return parsed, hits, False, None
+        # No graph or no symbol — fall through to fuzzy.
+        parsed = replace(parsed, intent="fuzzy")
+
     # --- Overview / catch-up Q&A path: structural digest via Graphify ---
     if parsed.intent == "overview":
         if grapher is not None:
@@ -209,6 +226,10 @@ def _evaluate(
             else:
                 candidates = grapher.query_overview()
                 if candidates:
+                    # Filter the structural digest by question keywords so
+                    # "how does auth work" returns auth modules, not all 50 files.
+                    if parsed.keywords:
+                        candidates = _filter_overview_by_keywords(candidates, parsed.keywords)
                     # Overview hits are descriptive — no reasoner ranking needed.
                     # Promote directly with the graph source label.
                     hits = tuple(
@@ -451,6 +472,22 @@ def _enrich_candidates_for_ranking(
             snippet=c.snippet, symbol=c.symbol, context=ctx,
         ))
     return tuple(enriched)
+
+
+def _filter_overview_by_keywords(
+    hits: tuple[GrepHit, ...], keywords: tuple[str, ...]
+) -> tuple[GrepHit, ...]:
+    """Filter structural overview hits to only those matching query keywords.
+
+    "how does auth work" → only modules mentioning auth/login/authentication.
+    If no hits match, returns the full overview (better than empty results).
+    Keywords shorter than 3 chars are skipped as too broad to filter usefully.
+    """
+    effective = [kw.lower() for kw in keywords if len(kw) >= 3]
+    if not effective:
+        return hits
+    matching = [h for h in hits if any(kw in h.file.lower() or kw in h.snippet.lower() for kw in effective)]
+    return tuple(matching) if matching else hits  # fallback: no keyword match → show all
 
 
 def _looks_like_history_query(question: str) -> bool:
