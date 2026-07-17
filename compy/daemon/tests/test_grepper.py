@@ -48,13 +48,13 @@ pytestmark_real = pytest.mark.skipif(RG is None, reason="ripgrep not installed")
 def test_ripgrep_finds_hits_in_temp_py_repo(tmp_path: Path):
     (tmp_path / "a.py").write_text("def foo(self):\n    return 1\n")
     (tmp_path / "b.py").write_text("def bar(self):\n    return foo() + 1\n")
-    (tmp_path / "c.txt").write_text("def foo(): pass\n")
+    (tmp_path / "c.txt").write_text("def foo(): pass\n")  # .txt excluded by denylist
 
     rg = RipgrepGrepper(rg_path=RG or "rg")
     hits = rg.grep("foo", str(tmp_path))
-    # .txt is no longer in the denylist — all three files should appear.
+    # .txt is in the denylist — only .py files appear.
     filenames = {Path(h.file).name for h in hits}
-    assert filenames == {"a.py", "b.py", "c.txt"}
+    assert filenames == {"a.py", "b.py"}
 
 
 @pytestmark_real

@@ -965,6 +965,56 @@ struct OverlayView: View {
             // Compy face — top-left, mirrors the macOS close button.
             // Always visible regardless of compact/expanded state.
             compyFace
+
+            // Intro animation: Compy's face pops in BIG at the center of the panel,
+            // scales from 3x → 1x with spring, then dissolves. Lives in the ZStack
+            // overlay so it's never clipped by the 72px window or VStack layout.
+            if state.phase == .empty && !introDone {
+                faceView(size: 48)
+                    .scaleEffect(introFaceScale)
+                    .position(x: 300, y: 36)  // centered in the 600×72 input bar
+                    .transition(.opacity)
+                    .onAppear {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                            introFaceScale = 1.0
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                introDone = true
+                            }
+                            state.startIdleFloat()
+                        }
+                    }
+            }
+
+            // After intro: "Press Cmd+Shift+Space to ask about your code" —
+            // in the ZStack so it isn't trapped in unreachable emptyState.
+            if state.phase == .empty && introDone {
+                VStack(spacing: 14) {
+                    HStack(spacing: 6) {
+                        Text("Press").foregroundColor(.secondary)
+                        HStack(spacing: 2) {
+                            Image(systemName: "command")
+                            Image(systemName: "shift")
+                            Text("Space")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color(NSColor.quaternaryLabelColor))
+                        .cornerRadius(4)
+                        Text("to ask about your code").foregroundColor(.secondary)
+                    }
+                    .font(.system(size: 13))
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+
+                    Text("Esc or X to dismiss")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                        .transition(.opacity)
+                }
+                .frame(width: 600)
+            }
         }
         .background(Color(NSColor.windowBackgroundColor))
         .onChange(of: state.phase) { _, newPhase in
@@ -1429,53 +1479,7 @@ struct OverlayView: View {
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            if !introDone {
-                // Compy face pops in BIG and bouncy, then settles before the input bar appears.
-                faceView(size: 48)
-                    .scaleEffect(introFaceScale)
-                    .padding(.top, 16)
-                    .transition(.opacity)
-                    .onAppear {
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
-                            introFaceScale = 1.0
-                        }
-                        // After the bounce settles, show the input hint.
-                        // 0.5s > 0.4s spring — ensures face has settled.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            withAnimation(.easeOut(duration: 0.25)) {
-                                introDone = true
-                            }
-                            state.startIdleFloat()
-                        }
-                    }
-            } else {
-                HStack(spacing: 6) {
-                    Text("Press").foregroundColor(.secondary)
-                    HStack(spacing: 2) {
-                        Image(systemName: "command")
-                        Image(systemName: "shift")
-                        Text("Space")
-                    }
-                    .font(.system(size: 12, weight: .semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color(NSColor.quaternaryLabelColor))
-                    .cornerRadius(4)
-                    Text("to ask about your code").foregroundColor(.secondary)
-                }
-                .font(.system(size: 13))
-                .transition(.opacity.combined(with: .move(edge: .bottom).combined(with: .opacity)))
-
-                Text("Esc or X to dismiss")
-                    .font(.system(size: 11))
-                    .foregroundColor(Color(NSColor.tertiaryLabelColor))
-                    .padding(.top, 4)
-                    .transition(.opacity)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onDisappear { state.stopIdleFloat() }
+        EmptyView()
     }
 
     // MARK: - Processing State

@@ -42,6 +42,11 @@ class RipgrepGrepper:
     # Everything else passes through — all languages, all configs.
     _SKIP_GLOBS: tuple[str, ...] = (
         "!*.md", "!*.rst", "!*.adoc",           # documentation
+        "!*.txt",                                # plain text / notes
+        "!*.json",                               # data/config (not lockfiles — those have their own entries)
+        "!*.yaml", "!*.yml",                     # config / data
+        "!*.toml",                               # config
+        "!*.cfg", "!*.ini",                      # config
         "!*.min.js", "!*.min.css", "!*.min.js.map", "!*.min.css.map",
         "!*.map",
         "!*.pyc", "!*.pyo", "!*.class", "!*.o", "!*.obj", "!*.so", "!*.dylib",
