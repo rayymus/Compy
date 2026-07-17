@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compy — Agent Onboarding Manual</title>
+<style>
+  :root {
+    --bg: #1e1e2e; --surface: #2a2a3c; --text: #cdd6f4; --muted: #6c7086;
+    --accent: #89b4fa; --green: #a6e3a1; --orange: #fab387; --red: #f38ba8;
+    --yellow: #f9e2af; --cyan: #94e2d5; --pink: #f5c2e7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', sans-serif; background: var(--bg); color: var(--text); padding: 40px; max-width: 960px; margin: 0 auto; line-height: 1.6; }
+  h1 { color: var(--accent); font-size: 28px; margin-bottom: 4px; }
+  h2 { color: var(--green); font-size: 20px; margin-top: 36px; margin-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 6px; }
+  h3 { color: var(--cyan); font-size: 16px; margin-top: 20px; margin-bottom: 6px; }
+  p { margin: 8px 0; color: var(--text); }
+  a { color: var(--accent); }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 3px; font-size: 13px; color: var(--accent); }
+  pre { background: var(--surface); padding: 14px; border-radius: 6px; overflow-x: auto; margin: 10px 0; font-size: 13px; line-height: 1.5; }
+  ul, ol { margin: 8px 0 8px 20px; }
+  li { margin: 4px 0; }
+  .card { background: var(--surface); border-radius: 8px; padding: 16px; margin: 12px 0; border-left: 3px solid var(--accent); }
+  .card.procedure { border-left-color: var(--pink); }
+  .card.warn { border-left-color: var(--orange); }
+  .card.danger { border-left-color: var(--red); }
+  .card.info { border-left-color: var(--cyan); }
+  .card.done { border-left-color: var(--green); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+  .tag-py { background: rgba(137,180,250,0.15); color: var(--accent); }
+  .tag-swift { background: rgba(249,226,175,0.15); color: var(--yellow); }
+  .tag-ts { background: rgba(148,226,213,0.15); color: var(--cyan); }
+  .tag-bug { background: rgba(243,139,168,0.15); color: var(--red); }
+  .tag-done { background: rgba(166,227,161,0.15); color: var(--green); }
+  .tag-next { background: rgba(245,194,231,0.15); color: var(--pink); }
+  .step { display: flex; align-items: flex-start; gap: 12px; margin: 10px 0; }
+  .step-num { background: var(--accent); color: var(--bg); min-width: 24px; height: 24px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+  hr { border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 24px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td code { font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>🧠 Compy — Agent Onboarding Manual</h1>
+<p style="color: var(--muted); font-size: 13px;">Read this first. Then read the <code>.agent/</code> files. Then start building.</p>
+<p><strong>Last updated:</strong> 2026-07-17 · <strong>Session:</strong> 30.5 · <strong>Commit:</strong> f807d73</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>0. Quick Facts</h2>
+<div class="card info">
+  <table>
+    <tr><th>What</th><td>macOS code-search overlay (Cmd+Shift+Space). Grep + call-graph + LLM ranking.</td></tr>
+    <tr><th>Stacks</th><td><span class="tag tag-swift">Swift</span> overlay &nbsp; <span class="tag tag-py">Python</span> daemon &nbsp; <span class="tag tag-ts">TypeScript</span> extension</td></tr>
+    <tr><th>Tests</th><td>140 pass, 1 skip (<code>python3 -m pytest compy/daemon/tests -q</code>)</td></tr>
+    <tr><th>Swift</th><td><code>cd compy/swift && swift build --quiet</code></td></tr>
+    <tr><th>Run</th><td><code>./compy.sh overlay</code> · Stop: <code>./compy.sh stop</code></td></tr>
+    <tr><th>Extension</th><td><code>cd compy/extension && npm run build</code> then Cmd+Shift+P → Install Extension from Location → <code>compy/extension/</code></td></tr>
+    <tr><th>Python</th><td>3.12+, requires tree-sitter, networkx, ollama (optional)</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>1. How To Work On This Project</h2>
+
+<div class="card procedure">
+  <h3>The Iterative Loop (from WORKFLOW.md)</h3>
+  <p>Never stop to handover mid-build. Run this cycle until done:</p>
+  <div class="step"><span class="step-num">1</span><span><strong>Implement</strong> — make the change. Keep it minimal: prefer simple over clever.</span></div>
+  <div class="step"><span class="step-num">2</span><span><strong>Review</strong> — spawn a code-reviewer agent on your changes.</span></div>
+  <div class="step"><span class="step-num">3</span><span><strong>Test</strong> — run Python tests + Swift build. Fix breakages immediately.</span></div>
+  <div class="step"><span class="step-num">4</span><span><strong>Edit workflow files</strong> — update AGENTS.md, DEVLOG.md, UPDATES.md, BRAIN.html, clarifications.md as needed. These are your WORKFLOW.md obligations.</span></div>
+  <div class="step"><span class="step-num">5</span><span><strong>Commit</strong> — descriptive message with session number.</span></div>
+  <div class="step"><span class="step-num">6</span><span><strong>Repeat</strong> — go back to step 1 for the next feature.</span></div>
+</div>
+
+<div class="card procedure">
+  <h3>The .agent/ Files — What They're For</h3>
+  <table>
+    <tr><th>File</th><th>Purpose</th><th>When to update</th></tr>
+    <tr><td><code>clarifications.md</code></td><td><strong>User ↔ agent communication.</strong> The user writes notes here. You write questions, status updates, and session summaries here. Format: dated blocks so both sides can follow who wrote what.</td><td>Every session. Check it after every build.</td></tr>
+    <tr><td><code>AGENTS.md</code></td><td><strong>Critical mistakes + handover.</strong> 16 mistakes you must not repeat. Personality spec. The next agent's survival guide.</td><td>Every time you make a mistake worth preventing.</td></tr>
+    <tr><td><code>BRAIN.html</code></td><td><strong>Your long-term memory.</strong> Map of what you're thinking, decision trees, current status, watchpoints. Declutter periodically.</td><td>Every session — update status.</td></tr>
+    <tr><td><code>DEVLOG.md</code></td><td><strong>Long-term design record.</strong> Architectural decisions, design shifts, findings. Not conversational — archival.</td><td>Every significant change.</td></tr>
+    <tr><td><code>UPDATES.md</code></td><td><strong>Pseudo-chat with the user.</strong> Short, conversational. What changed this session. Temporary — not long-term storage.</td><td>Every session.</td></tr>
+    <tr><td><code>onboarding.html</code></td><td><strong>This file.</strong> The first thing new agents read.</td><td>When project structure or procedures change.</td></tr>
+    <tr><td><code>claude-ask.md</code></td><td><strong>Questions for Claude.</strong> Deep-reasoning prompts for the external reasoning model.</td><td>When you need Claude's input.</td></tr>
+    <tr><td><code>claude-response*.md</code></td><td><strong>Claude's answers.</strong> Specs to build from.</td><td>Read-only — don't edit these.</td></tr>
+  </table>
+</div>
+
+<div class="card procedure">
+  <h3>How To Communicate With The User</h3>
+  <ul>
+    <li><strong>Ask questions via <code>ask_user</code> tool</strong> — multiple choice or free-form. Use when you need decisions.</li>
+    <li><strong>Write status updates in <code>clarifications.md</code></strong> — dated blocks with clear "User:" / "Agent:" labels.</li>
+    <li><strong>Check <code>clarifications.md</code> after every build</strong> — the user may have left new instructions.</li>
+    <li><strong>Use <code>suggest_followups</code></strong> at the end of every turn — 3 clickable next steps.</li>
+    <li><strong>Be concise.</strong> The user doesn't want walls of text. Cut articles. Minimum for understanding.</li>
+  </ul>
+</div>
+
+<div class="card procedure">
+  <h3>How To Build Features</h3>
+  <ul>
+    <li><strong>Read the spec first.</strong> Find it in <code>claude-response*.md</code> or <code>clarifications.md</code>.</li>
+    <li><strong>Gather context.</strong> Spawn <code>file-picker</code> and <code>code-searcher</code> agents to find relevant files. Read them.</li>
+    <li><strong>Think before coding.</strong> For non-trivial problems, spawn a thinker agent with the relevant file paths.</li>
+    <li><strong>Plan with <code>write_todos</code>.</strong> Break work into 4-8 concrete steps with clear completion criteria.</li>
+    <li><strong>Make minimal edits.</strong> Prefer <code>str_replace</code> over rewriting whole files. One change at a time.</li>
+    <li><strong>Always test.</strong> Run <code>python3 -m pytest compy/daemon/tests -q</code> and <code>cd compy/swift && swift build --quiet</code> after every change batch.</li>
+    <li><strong>Always review.</strong> Spawn a code-reviewer agent on your changes.</li>
+  </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>2. Architecture</h2>
+
+<div class="card info">
+  <h3>Data Flow</h3>
+  <pre>
+Cmd+Shift+Space → extension writes /tmp/compy-selection.json
+                → Swift reads file + AX workspace detection
+                → Swift spawns: python3 -m compy.daemon
+                → stdin: QueryRequest JSON
+                → daemon: parser.parse() → grepper.grep() → reasoner.reason()
+                → stdout: NDJSON (stream event + final QueryResult)
+                → Swift: result rows → click → EditorOpener.open()
+  </pre>
+</div>
+
+<h3>Code Map</h3>
+<pre>
+compy/
+  swift/Sources/Compy/
+    OverlayPanel.swift     — NSPanel, SwiftUI, face system, daemon subprocess (~2800 lines)
+    HotkeyManager.swift    — Cmd+Shift+Space, AX workspace detection
+    Models.swift           — Codable: Selection, QueryRequest, QueryResult, RankedHit
+  daemon/
+    __main__.py            — CLI entry, stdin JSON → stdout JSON
+    orchestrator.py        — parse → grep → rank, _evaluate(), ~550 lines ★ MAIN PIPELINE
+    parser.py              — RuleBasedParser, 14 regex intent rules, keyword extraction
+    grepper.py             — ripgrep wrapper + denylist (excludes .json/.yaml/.txt etc.) + StubGrepper
+    reasoner.py            — OllamaReasoner, FreebuffReasoner, StubReasoner
+    heuristic_reasoner.py  — Jaccard + n-gram + rarity offline ranker
+    graphify.py            — tree-sitter → NetworkX DiGraph, query_calls/callers/path/overview
+    gitlog.py              — git log/blame
+    refactor.py            — Tier 1 formatters + Tier 2 rename, stage/apply/undo pipeline
+    models.py              — frozen dataclasses: ParsedQuery, GrepHit, RankedHit, etc.
+    interfaces.py          — Protocol classes: Parser, Grepper, Grapher, Historian, Reasoner
+    stt.py                 — whisper.cpp speech-to-text
+  extension/src/
+    extension.ts           — VS Code extension: selection capture
+</pre>
+
+<h3>Intent Routing (orchestrator._evaluate)</h3>
+<pre>
+trace        → extract file:line from stack trace → direct jump
+relational   → Graphify query (calls/callers/imports/subclasses)
+blast_radius → Graphify query_blast_radius (callers+importers+subclasses)
+graph_path   → Graphify query_path (nx.shortest_path)
+explain      → _build_explain_result (definition + callers + callees)
+history      → git log/blame
+rationale    → git history → fuzzy fallback
+overview     → Graphify query_overview (module map, keyword-filtered)
+dead_code    → Graphify query_dead_code
+references   → smart grep patterns (def\s+X, class\s+X)
+definition   → smart grep patterns
+fuzzy        → multi-keyword OR grep → reasoner ranking
+rename       → Graphify callers + tree-sitter identifier scoping → multi-file apply/undo
+format       → formatters (Black/Prettier), /confirm, /undo (compy/daemon/refactor.py)
+</pre>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>3. Critical Mistakes — Never Repeat These</h2>
+
+<div class="card danger">
+  <p><strong>1.</strong> Never pass <code>None</code> as workspace_root to ripgrep. <code>subprocess.run(cwd=None)</code> → TypeError.</p>
+  <p><strong>2.</strong> <code>to_json(indent=2)</code> breaks NDJSON. Multi-line JSON → <code>lines.last = "}"</code> → every query fails silently.</p>
+  <p><strong>3.</strong> Enrichment + annotation = duplicate Graphify work. Propagate <code>GrepHit.context</code> → <code>RankedHit.structural_context</code> in ALL reasoners.</p>
+  <p><strong>4.</strong> Two Antigravity windows = shared-file race on <code>/tmp/compy-selection.json</code>. Always AX cross-check on hotkey.</p>
+  <p><strong>5.</strong> <code>explain</code> intent requires a selection. Without one, downgrade to fuzzy. Explain patterns MUST come before rationale in _INTENT_RULES.</p>
+  <p><strong>6.</strong> Extension MUST be installed. Without it, AX fallback picks up Terminal → CWD = Desktop/ → wrong workspace.</p>
+  <p><strong>7.</strong> SwiftUI <code>.onDisappear</code> can't animate. Stop timers cleanly; let parent drive transitions.</p>
+  <p><strong>8.</strong> AppleScript fails silently on Electron apps. Use AXUIElement (<code>kAXDocumentAttribute</code>) instead.</p>
+  <p><strong>9.</strong> <code>stage_rename()</code> must resolve the definition node separately from callers — duplicating the callers query means the definition file is never renamed.</p>
+  <p><strong>10.</strong> SwiftUI views inside <code>contentArea</code> are unreachable during <code>.empty</code> phase — <code>shouldShowContent</code> gates the entire subtree. Put overlays (face intro, hint text) in the ZStack layer.</p>
+</div>
+<p style="font-size: 12px; color: var(--muted);">Full list (16 items) in <code>.agent/AGENTS.md</code>. Read it.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>4. Current State (Session 30.5)</h2>
+
+<h3>✅ Shipped Sessions 29–30.5</h3>
+<div class="card done">
+  <ul>
+    <li><strong>Micro code explainer</strong> — <code>_build_explain_result()</code>: select a function, ask "what does this do" → definition + callers + callees from Graphify</li>
+    <li><strong>Graph path traversal</strong> — <code>query_path()</code> via <code>nx.shortest_path()</code></li>
+    <li><strong>Tier 1 refactoring</strong> — formatters (Black .py, Prettier .js/.ts/.json/.md) with shared apply pipeline: pre-write verify → stage → confirm → atomic write → undo (<code>compy/daemon/refactor.py</code>)</li>
+    <li><strong>Tier 2 graph-verified rename</strong> — "rename X to Y": Graphify callers + tree-sitter identifier scoping + multi-file apply/undo</li>
+    <li><strong>Swift refactor UI</strong> — <code>.refactorProposal</code> Phase, file list, confirm/reject buttons, Esc/Enter shortcuts</li>
+    <li><strong>Face pop-in intro</strong> — face scales 3x→1x with spring, centered in panel (ZStack overlay, not clipped by window)</li>
+    <li><strong>Grepper denylist expanded</strong> — excludes .json, .yaml, .yml, .toml, .cfg, .ini, .txt. No more README.md or package.json in search results.</li>
+    <li><strong>Onboarding manual</strong> — this file</li>
+  </ul>
+</div>
+
+<h3>✅ Previously Shipped</h3>
+<ul>
+  <li>Grep → rank → display pipeline (140 tests)</li>
+  <li>Graphify call-graph (Python tree-sitter, NetworkX)</li>
+  <li>Git log/blame history queries</li>
+  <li>Smart grep patterns for <code>definition</code> intent</li>
+  <li>NL workspace switching ("find X in project/")</li>
+  <li>URL scheme file opening (antigravity-ide://, no temp window)</li>
+  <li>Face animation system (blink/wink/dart/reaction/mood)</li>
+  <li>Session memory (previous results dimmed during follow-ups)</li>
+  <li>Layer 2 enrichment (graph callers + verification labels in reasoner prompts)</li>
+  <li>Streaming intermediate results (shimmer + haptic + ranking badge)</li>
+  <li>Session export as animated HTML</li>
+  <li>Smart no-match suggestions (synonyms)</li>
+  <li>30 refactor/rename tests (stage/apply/undo round-trips)</li>
+</ul>
+
+<h3>🔜 Next To Build</h3>
+<div class="card">
+  <ol>
+    <li><strong>Tier 3 inline suggestions</strong> — quick fixes (extract variable, add type hint). Spec in <code>claude-response3.md</code> §4.</li>
+    <li><strong>Tier 4 code catchup</strong> — "how does this work" with deeper structural analysis.</li>
+    <li><strong>Parser tests</strong> — add test coverage for explain, graph_path, rename, and format intents.</li>
+    <li><strong>P5: ML parser upgrade</strong> — replace RuleBasedParser with local model. Parse-decision logs at <code>/tmp/compy-parse-decisions.log</code> are the training data.</li>
+  </ol>
+</div>
+
+<h3>⚠️ Known Limitations</h3>
+<ul>
+  <li><strong>Python-only graph</strong> — tree-sitter grammar is Python. JS/TS/Rust/Go codebases get grep-only (no explain, no graph_path, no callers).</li>
+  <li><strong>Regex parser</strong> — 14 hand-tuned regex rules. Can't truly understand semantics. "What does this do" without "function" → fuzzy.</li>
+  <li><strong>No embedding search</strong> — ranking is token overlap (Jaccard + n-gram + rarity). No semantic similarity.</li>
+  <li><strong>Ollama 1.5B only ranks</strong> — never generates explanations or summaries. It scores candidates, nothing more.</li>
+  <li><strong>NDJSON fragility</strong> — <code>lines.last</code> breaks if anything writes to stdout (debug print, deprecation warning).</li>
+</ul>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>5. Tips For Working Efficiently</h2>
+
+<div class="card info">
+  <ul>
+    <li><strong>Parallelize.</strong> Spawn multiple agents at once — file-pickers, code-searchers, bashers. Don't wait for one before starting the next.</li>
+    <li><strong>Use basher for batch edits.</strong> When <code>str_replace</code> is too fiddly (whitespace, large files), use Python scripts via basher.</li>
+    <li><strong>Read, don't guess.</strong> Always verify code claims against the actual files. Claude's responses sometimes reference code that doesn't exist yet.</li>
+    <li><strong>Prefer existing patterns.</strong> Reuse helper functions, Protocol methods, and model fields. Don't invent new abstractions when existing ones work.</li>
+    <li><strong>Keep changes small.</strong> One feature per commit. Easier to review, easier to revert.</li>
+    <li><strong>Don't over-engineer.</strong> Compy is a developer tool, not a framework. Simple code that works > elegant code that's fragile.</li>
+  </ul>
+</div>
+
+<hr>
+<p style="color: var(--muted); font-size: 12px; text-align: center;">
+  Compy Agent Onboarding Manual · Session 30.5 · <code>f807d73</code><br>
+  After reading this, read <code>.agent/clarifications.md</code> for current user instructions.<br>
+  Then read <code>.agent/AGENTS.md</code> for all 16 critical mistakes and the personality spec.
+</p>
+
+</body>
+</html>
