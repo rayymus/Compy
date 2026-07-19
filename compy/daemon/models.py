@@ -103,6 +103,9 @@ class QueryResult:
     # Refactoring pipeline — set when intent="format" and proposals are staged.
     refactor_proposals: tuple[FileProposal, ...] | None = None  # files that would change
     refactor_token: str | None = None  # pointer to staged edits on disk for /confirm
+    # Working Set Engine — Session 34
+    next_questions: tuple[str, ...] | None = None  # "X is called in N places — see them?"
+    personalization_active: bool = False  # True when ranking was biased by recent context
 
 
 @dataclass(frozen=True)

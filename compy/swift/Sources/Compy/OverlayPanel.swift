@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 import Carbon.HIToolbox.Events
+import CryptoKit
 
 // MARK: - Compy Message Pool (Personality System)
 
@@ -117,6 +118,37 @@ struct CompyMessagePool {
 ///
 /// `basePath` must be set once at launch to the project root so that relative
 /// file paths from the daemon are resolved to absolute paths.
+/// Working Set click feedback — writes a tmp file the daemon reads on next spawn.
+/// The daemon boosts the clicked node's activation score (session-scoped, decaying).
+/// Workspace hash must match the Python side's `hashlib.md5(workspace)[:8]`.
+struct WorkingSetClick {
+    static func write(file: String, line: Int, workspace: String) {
+        guard !workspace.isEmpty else { return }
+        let hash = Self.wsHash(workspace)
+        let path = "/tmp/compy-workingset-click-\(hash).json"
+        let payload = "{\"file\":\"\(Self.escape(file))\",\"line\":\(line)}"
+        try? payload.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// MD5 hash of workspace path, first 8 hex chars — matches Python's
+    /// `hashlib.md5(workspace.encode()).hexdigest()[:8]`.
+    private static func wsHash(_ workspace: String) -> String {
+        // Normalize before hashing — matches Python's os.path.normpath(workspace).
+        // Without this, a trailing slash would produce a different hash and the
+        // daemon would never find the click tmp file.
+        let normalized = (workspace as NSString).standardizingPath
+        let digest = Insecure.MD5.hash(data: Data(normalized.utf8))
+        // Join all 16 byte-strings into a 32-char hex string, then take first 8 chars.
+        // Must match Python: hashlib.md5(workspace.encode()).hexdigest()[:8]
+        return String(digest.map { String(format: "%02x", $0) }.joined().prefix(8))
+    }
+
+    private static func escape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+}
+
 struct EditorOpener {
     static var basePath: String = "/"
 
@@ -395,6 +427,8 @@ final class OverlayState: ObservableObject {
 
     /// Smart suggestions from daemon on no-match (synonyms, selection hints).
     @Published var noMatchSuggestions: [String]? = nil
+    @Published var nextQuestions: [String]? = nil  // Working Set: "X is called in N places — see them?"
+    @Published var personalizationActive: Bool = false  // Working Set: ranking biased by recent context
     /// Brief toast message shown in the input bar after commands like /workspace.
     @Published var toastMessage: String? = nil
     /// Staged refactor token — non-nil while showing a refactor proposal.
@@ -917,6 +951,8 @@ final class OverlayState: ObservableObject {
         sttError = nil
         sttPhase = ""
         resultHeaderText = ""
+        nextQuestions = nil
+        personalizationActive = false
         baseFace = ">-<"
         isBlinking = false
         isWinking = false
@@ -1593,7 +1629,7 @@ struct OverlayView: View {
                 ScrollView {
                     LazyVStack(spacing: 4) {
                         ForEach(Array(state.previousResults.enumerated()), id: \.element.id) { index, hit in
-                            ResultRow(hit: hit, index: index)
+                            ResultRow(hit: hit, index: index, workspaceRoot: state.workspaceRoot ?? "")
                                 .opacity(0.35)
                                 .allowsHitTesting(false)  // prevent accidental clicks during processing
                         }
@@ -1669,14 +1705,64 @@ struct OverlayView: View {
             resultHeader
 
             ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(Array(state.results.enumerated()), id: \.element.id) { index, hit in
-                        ResultRow(hit: hit, index: index)
+                LazyVStack(spacing: 4) {                        ForEach(Array(state.results.enumerated()), id: \.element.id) { index, hit in
+                        ResultRow(hit: hit, index: index, workspaceRoot: state.workspaceRoot ?? "")
                     }
                 }
                 .padding(12)
             }
+
+            // Working Set: next-question suggestions below results.
+            // "X is called in N places — see them?" — clickable to re-query.
+            if let questions = state.nextQuestions, !questions.isEmpty {
+                nextQuestionsView(questions)
+            }
         }
+    }
+
+    /// Working Set: next-question suggestions — derived from active graph nodes.
+    /// Each suggestion is clickable, sending it as a new query immediately.
+    private func nextQuestionsView(_ questions: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 10))
+                    .foregroundColor(.purple)
+                Text("Next")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+
+            ForEach(questions, id: \.self) { q in
+                Button(action: {
+                    state.text = q
+                    submitQuery()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.purple.opacity(0.7))
+                        Text(q)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Image(systemName: "arrow.up.forward")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.purple.opacity(0.06))
+                    .cornerRadius(6)
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .help("Search this question")
+            }
+        }
+        .padding(.bottom, 8)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
 
     // MARK: - Result Header
@@ -1724,6 +1810,16 @@ struct OverlayView: View {
             }
             .buttonStyle(.plain)
             .help("Export animated session clip as HTML")
+
+            // Working Set: "influenced by recent context" indicator.
+            // Shows when Personalized PageRank measurably changed the ranking.
+            if state.personalizationActive && !headerIsRanking {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.purple)
+                    .help("Ranking influenced by your recent search context")
+                    .transition(.opacity.combined(with: .scale))
+            }
 
             // Source badge — fades in when ranking completes.
             // Hidden during the "Ranking N candidates…" streaming phase.
@@ -2433,6 +2529,8 @@ struct OverlayView: View {
                         state.text = ""  // clear text so user can type follow-up immediately
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
+                            state.nextQuestions = result.nextQuestions
+                            state.personalizationActive = result.personalizationActive
                             state.reasonText = result.reason
                             if result.hits.isEmpty {
                                 state.phase = .noMatch
@@ -2507,6 +2605,7 @@ struct OverlayView: View {
 struct ResultRow: View {
     let hit: RankedHit
     let index: Int
+    let workspaceRoot: String
     @State private var isHovered = false
     @State private var appeared = false
     /// Shimmer sweep position — animates from -200 to 600 for dimmed intermediate rows.
@@ -2620,7 +2719,7 @@ struct ResultRow: View {
             // handles the transition to full opacity.
             _ = newScore
         }
-        .onHover { hovering in
+                .onHover { hovering in
             isHovered = hovering
             if hovering {
                 NSCursor.pointingHand.push()
@@ -2629,6 +2728,7 @@ struct ResultRow: View {
             }
         }
         .onTapGesture {
+            WorkingSetClick.write(file: hit.file, line: hit.line, workspace: workspaceRoot)
             OverlayController.shared.hide(); EditorOpener.open(file: hit.file, line: hit.line)
         }
     }

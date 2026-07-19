@@ -67,11 +67,15 @@ struct QueryResult: Codable {
     let suggestions: [String]?  // "did you mean X?" on no-match
     let refactorProposals: [FileProposal]?  // files that would change (format intent)
     let refactorToken: String?  // pointer to staged edits for /confirm
+    let nextQuestions: [String]?  // Working Set: "X is called in N places — see them?"
+    let personalizationActive: Bool  // Working Set: ranking was biased by recent context
 
     enum CodingKeys: String, CodingKey {
         case intent, hits, degraded, reason, suggestions
         case refactorProposals = "refactor_proposals"
         case refactorToken = "refactor_token"
+        case nextQuestions = "next_questions"
+        case personalizationActive = "personalization_active"
     }
 }
 

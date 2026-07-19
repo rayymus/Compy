@@ -20,6 +20,7 @@ from .models import (
     RankedHit,
     Selection,
 )
+from .workingset import WorkingSet
 from .parser import SYNONYM_MAP, _extract_trace_frames, _is_trace_input
 
 # Regex to pull a Python symbol name from a snippet (def/class).
@@ -86,6 +87,24 @@ def run(
         else "."
     )
 
+    # ── Working Set Engine (Session 34) ──────────────────────────────────
+    # Session-scoped activation scores with decay + Personalized PageRank.
+    # Three outputs: ranking bias, ambient badges (already rendered), next-questions.
+    # Graph is loaded lazily AFTER _evaluate (see below) to avoid pickle I/O on
+    # every query — we reuse whatever _evaluate already loaded for relational/explain.
+    ws = WorkingSet.load(workspace)
+    # Consume any pending click — primary boost only (no neighbor propagation
+    # yet since the graph isn't loaded). Neighbor propagation is a secondary
+    # effect; the primary click boost doesn't need the graph.
+    ws.consume_click(None)
+    # Detect topic shift — reset activation if the user moved to a new topic.
+    if ws.detect_topic_shift(parsed.keywords):
+        ws.reset()
+    # Decay all scores (happens every turn).
+    ws.decay()
+    # Record this query's keywords for future topic-shift detection.
+    ws.record_keywords(parsed.keywords)
+
     parsed, hits, degraded, reason = _evaluate(
         parsed=parsed,
         parser=parser,
@@ -103,7 +122,34 @@ def run(
     # Since Layer 2 enrichment already computed context per GrepHit, and reasoners
     # propagate it to RankedHit.structural_context, no duplicate Graphify query needed.
     suggestions = _generate_suggestions(parsed, request.selection) if not hits else None
-    return QueryResult(intent=parsed.intent, hits=hits, degraded=degraded, reason=reason, suggestions=suggestions)
+
+    # ── Working Set: bias ranking + record + next-questions ─────────────
+    # After _evaluate: grapher may have loaded the graph for relational/explain.
+    # Reuse it; only fast_only-load if still None AND we have activation to bias.
+    # This avoids pickle I/O on fuzzy/definition queries that never touch Graphify.
+    ws_graph = getattr(grapher, "raw_graph", None) if grapher else None
+    if ws_graph is None and grapher is not None and ws.has_activation and hits:
+        try:
+            grapher.load(workspace, fast_only=True)
+            ws_graph = getattr(grapher, "raw_graph", None)
+        except ReasonerUnavailable:
+            ws_graph = None  # no cached graph — raw activation fallback
+    personalization_active = False
+    if hits:
+        hits, personalization_active = ws.bias_hits(hits, ws_graph)
+        ws.record_query(hits)
+    next_questions = ws.generate_next_questions(ws_graph)
+    ws.save()
+
+    return QueryResult(
+        intent=parsed.intent,
+        hits=hits,
+        degraded=degraded,
+        reason=reason,
+        suggestions=suggestions,
+        next_questions=tuple(next_questions) if next_questions else None,
+        personalization_active=personalization_active,
+    )
 
 
 def _evaluate(

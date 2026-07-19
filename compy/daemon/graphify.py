@@ -622,6 +622,15 @@ class GraphQuerier:
         except Exception as exc:
             raise ReasonerUnavailable(f"Graphify: {exc}") from exc
 
+    @property
+    def raw_graph(self) -> nx.DiGraph | None:
+        """Direct access to the underlying NetworkX graph.
+
+        Used by the Working Set Engine for Personalized PageRank computation.
+        Returns None if the graph hasn't been loaded yet.
+        """
+        return self._graph
+
     def query_calls(self, symbol: str) -> tuple[GrepHit, ...]:
         """What does this symbol call?"""
         return self._query_edges(symbol, "calls", direction="out")
