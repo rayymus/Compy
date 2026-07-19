@@ -1,6 +1,7 @@
 """Graphify — persistent code-knowledge graph for relational queries.
 
-Uses tree-sitter (Python grammar) to parse source files and build a NetworkX DiGraph
+Uses tree-sitter with multi-language support (Python, JavaScript, TypeScript,
+Rust, Go) to parse source files and build a NetworkX DiGraph
 of symbols (functions, classes, methods) connected by edges (calls, imports, inheritance).
 The graph is serialized to disk (~/.compy/graph.pkl) for persistence across sessions.
 
@@ -27,179 +28,379 @@ import networkx as nx
 from .interfaces import ReasonerUnavailable
 from .models import GrepHit
 
-# Lazy imports — tree-sitter + tree-sitter-python are only imported when _build_graph()
-# is actually called. This prevents import-time crashes when the versions are mismatched
-# (e.g. tree-sitter 0.26.0 + tree-sitter-python 0.25.0 on conda Python). The error
-# surfaces only when graphify is actually used, with a clear message.
+# Lazy imports — tree-sitter grammars are only imported when _build_graph()
+# is actually called. Each language grammar is loaded on demand via _ensure_language().
+# This prevents import-time crashes from mismatched versions and missing optional grammars.
 _lazy_imports_done = False
-_tspython = None
 _Language = None
-_Node = None
 _Parser = None
 _Query = None
 _QueryCursor = None
+_lang_modules: dict[str, object] = {}  # language name → grammar module
 
 
 def _ensure_imports() -> None:
-    global _lazy_imports_done, _tspython, _Language, _Node, _Parser, _Query, _QueryCursor
+    """Load the core tree-sitter types. Called once."""
+    global _lazy_imports_done, _Language, _Parser, _Query, _QueryCursor
     if _lazy_imports_done:
         return
     try:
-        import tree_sitter_python as _tspython
         from tree_sitter import Language as _Language
         from tree_sitter import Parser as _Parser
         from tree_sitter import Query as _Query
         from tree_sitter import QueryCursor as _QueryCursor
     except ImportError as exc:
         raise ReasonerUnavailable(
-            f"Graphify requires tree-sitter and tree-sitter-python: {exc}. "
-            f"Install with: pip install tree-sitter tree-sitter-python"
+            f"Graphify requires tree-sitter: {exc}. "
+            f"Install with: pip install tree-sitter"
         ) from exc
     _lazy_imports_done = True
+
+
+def _load_lang_module(lang_name: str) -> object | None:
+    """Lazy-load a tree-sitter language grammar module. Returns None if unavailable."""
+    _ensure_imports()
+    if lang_name in _lang_modules:
+        return _lang_modules[lang_name]
+    mapping = {
+        "python": "tree_sitter_python",
+        "javascript": "tree_sitter_javascript",
+        "typescript": "tree_sitter_typescript",
+        "rust": "tree_sitter_rust",
+        "go": "tree_sitter_go",
+    }
+    pkg = mapping.get(lang_name)
+    if pkg is None:
+        return None
+    try:
+        mod = __import__(pkg)
+        # TypeScript has multiple language getters
+        if lang_name == "typescript":
+            getter = getattr(mod, "language_typescript", None)
+        else:
+            getter = getattr(mod, "language", None)
+        if getter is None:
+            return None
+        _lang_modules[lang_name] = mod
+        return mod
+    except ImportError:
+        return None
 
 # Cache path — one graph per workspace root.
 CACHE_DIR = Path.home() / ".compy"
 GRAPH_EXT = ".graph.pkl"
 
-# tree-sitter query for function/class definitions.
-_DEF_QUERY_STR = """
+# ── Multi-language tree-sitter queries (§1, claude-response5) ──
+# Each language has its own AST node types and queries.  Nodes and edges are
+# normalized to a common schema (kind=function/class/module/unknown) so the
+# GraphQuerier works identically across languages.
+
+# Per-language definition node types (for _enclosing_symbol).
+_DEF_TYPES: dict[str, tuple[str, ...]] = {
+    "python": ("function_definition", "class_definition"),
+    "javascript": ("function_declaration", "class_declaration", "method_definition"),
+    "typescript": ("function_declaration", "class_declaration", "method_definition"),
+    "rust": ("function_item", "struct_item", "enum_item", "trait_item", "impl_item"),
+    "go": ("function_declaration", "type_declaration", "method_declaration"),
+}
+
+_DEF_QUERIES: dict[str, str] = {
+    "python": """
 (function_definition
-  name: (identifier) @func.name
-  body: (block) @func.body) @func.def
-
+  name: (identifier) @func.name) @func.def
 (class_definition
-  name: (identifier) @class.name
-  body: (block) @class.body) @class.def
-"""
+  name: (identifier) @class.name) @class.def
+""",
+    "javascript": """
+(function_declaration
+  name: (identifier) @func.name) @func.def
+(class_declaration
+  name: (identifier) @class.name) @class.def
+(method_definition
+  name: (property_identifier) @func.name) @func.def
+""",
+    "typescript": """
+(function_declaration
+  name: (identifier) @func.name) @func.def
+(class_declaration
+  name: (type_identifier) @class.name) @class.def
+(method_definition
+  name: (property_identifier) @func.name) @func.def
+""",
+    "rust": """
+(function_item
+  name: (identifier) @func.name) @func.def
+(struct_item
+  name: (type_identifier) @class.name) @class.def
+(enum_item
+  name: (type_identifier) @class.name) @class.def
+(trait_item
+  name: (type_identifier) @class.name) @class.def
+(impl_item
+  type: (type_identifier) @class.name) @class.def
+""",
+    "go": """
+(function_declaration
+  name: (identifier) @func.name) @func.def
+(method_declaration
+  name: (field_identifier) @func.name) @func.def
+(type_declaration
+  name: (type_identifier) @class.name) @class.def
+""",
+}
 
-# tree-sitter query for call expressions (function calls).
-_CALL_QUERY_STR = """
+_CALL_QUERIES: dict[str, str] = {
+    "python": """
 (call
   function: (identifier) @call.name) @call.expr
-
 (call
   function: (attribute
     object: (identifier) @call.obj
     attribute: (identifier) @call.attr)) @call.expr
-"""
+""",
+    "javascript": """
+(call_expression
+  function: (identifier) @call.name) @call.expr
+(call_expression
+  function: (member_expression
+    property: (property_identifier) @call.prop)) @call.expr
+""",
+    "typescript": """
+(call_expression
+  function: (identifier) @call.name) @call.expr
+(call_expression
+  function: (member_expression
+    property: (property_identifier) @call.prop)) @call.expr
+""",
+    "rust": """
+(call_expression
+  function: (identifier) @call.name) @call.expr
+(call_expression
+  function: (field_expression
+    field: (field_identifier) @call.prop)) @call.expr
+""",
+    "go": """
+(call_expression
+  function: (identifier) @call.name) @call.expr
+(call_expression
+  function: (selector_expression
+    field: (field_identifier) @call.prop)) @call.expr
+""",
+}
 
-# tree-sitter query for import statements.
-_IMPORT_QUERY_STR = """
+_IMPORT_QUERIES: dict[str, str] = {
+    "python": """
 (import_statement
   name: (dotted_name) @import.name) @import.stmt
-
 (import_from_statement
   module_name: (dotted_name) @import.from
   name: (dotted_name) @import.name) @import.stmt
-"""
+""",
+    "javascript": """
+(import_statement) @import.stmt
+(lexical_declaration
+  (variable_declarator
+    name: (identifier) @import.name
+    value: (call_expression
+      function: (identifier) @_req
+      arguments: (arguments (string) @import.from))) @import.stmt
+  (#eq? @_req "require"))
+""",
+    "typescript": """
+(import_statement) @import.stmt
+""",
+}
 
-# tree-sitter query for class inheritance.
-_INHERIT_QUERY_STR = """
+_INHERIT_QUERIES: dict[str, str] = {
+    "python": """
 (class_definition
   name: (identifier) @class.name
   superclasses: (argument_list
     (identifier) @parent.name)) @class.def
-"""
+""",
+    "javascript": """
+(class_declaration
+  name: (identifier) @class.name) @class.def
+""",
+    "typescript": """
+(class_declaration
+  name: (type_identifier) @class.name) @class.def
+""",
+}
 
+# File extension → language name mapping.
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".rs": "rust",
+    ".go": "go",
+}
 
 def _build_graph(workspace_root: str) -> nx.DiGraph:
-    """Build a NetworkX DiGraph from all .py files in workspace_root."""
+    """Build a NetworkX DiGraph from all supported source files in workspace_root.
+
+    Supports Python, JavaScript, TypeScript, Rust, and Go via tree-sitter.
+    Each file is parsed with its language-specific grammar; nodes and edges
+    are normalized to a common schema so the GraphQuerier works identically
+    across all languages.
+    """
     _ensure_imports()
-    lang = _Language(_tspython.language())  # type: ignore[arg-type]
-    parser = _Parser(lang)
-
     graph = nx.DiGraph()
+    ws_path = Path(workspace_root)
 
-    def_q = _Query(lang, _DEF_QUERY_STR)
-    call_q = _Query(lang, _CALL_QUERY_STR)
-    import_q = _Query(lang, _IMPORT_QUERY_STR)
-    inherit_q = _Query(lang, _INHERIT_QUERY_STR)
+    # Group files by language for one-parser-per-language efficiency.
+    lang_files: dict[str, list[Path]] = {}
+    for ext, lang in _EXT_TO_LANG.items():
+        pattern = f"*{ext}"
+        for fp in ws_path.rglob(pattern):
+            # Skip hidden dirs, node_modules, and caches.
+            parts = fp.parts
+            if any(p.startswith(".") for p in parts):
+                continue
+            if any(skip in parts for skip in ("node_modules", "__pycache__", "target", "vendor")):
+                continue
+            lang_files.setdefault(lang, []).append(fp)
 
-    py_files = list(Path(workspace_root).rglob("*.py"))
-    # Skip hidden dirs and test caches.
-    py_files = [
-        f for f in py_files
-        if not any(p.startswith(".") for p in f.parts)
-        and "__pycache__" not in str(f)
-    ]
+    # Process each language separately.
+    for lang_name, files in sorted(lang_files.items()):
+        mod = _load_lang_module(lang_name)
+        if mod is None:
+            continue  # Grammar not installed — silently skip this language.
 
-    for file_path in py_files:
-        try:
-            source = file_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        # Get the language object.
+        if lang_name == "typescript":
+            getter = getattr(mod, "language_typescript", None)
+        else:
+            getter = getattr(mod, "language", None)
+        if getter is None:
             continue
+        lang = _Language(getter())
+        parser = _Parser(lang)
 
-        tree = parser.parse(source.encode("utf-8"))
-        rel_path = str(file_path.relative_to(workspace_root))
+        # Compile language-specific queries (or skip ones not defined).
+        def_q = _Query(lang, _DEF_QUERIES[lang_name]) if lang_name in _DEF_QUERIES else None
+        call_q = _Query(lang, _CALL_QUERIES[lang_name]) if lang_name in _CALL_QUERIES else None
+        import_q = _Query(lang, _IMPORT_QUERIES[lang_name]) if lang_name in _IMPORT_QUERIES else None
+        inherit_q = _Query(lang, _INHERIT_QUERIES[lang_name]) if lang_name in _INHERIT_QUERIES else None
 
-        # --- definitions (functions + classes) ---
-        def_cur = _QueryCursor(def_q)
-        for cap_name, cap_nodes in def_cur.captures(tree.root_node).items():
-            for cap_node in cap_nodes:
-                if cap_name == "func.name":
-                    node_text = cap_node.text.decode("utf-8")
-                    node_id = f"{rel_path}::{node_text}"
-                    graph.add_node(node_id, kind="function", file=rel_path,
-                                   line=cap_node.start_point[0] + 1,
-                                   snippet=_node_snippet(cap_node, source))
-                elif cap_name == "class.name":
-                    node_text = cap_node.text.decode("utf-8")
-                    node_id = f"{rel_path}::{node_text}"
-                    graph.add_node(node_id, kind="class", file=rel_path,
-                                   line=cap_node.start_point[0] + 1,
-                                   snippet=_node_snippet(cap_node, source))
+        def_types = _DEF_TYPES.get(lang_name, ("function_definition", "class_definition"))
 
-        # --- calls ---
-        call_cur = _QueryCursor(call_q)
-        for cap_name, cap_nodes in call_cur.captures(tree.root_node).items():
-            for cap_node in cap_nodes:
-                if cap_name == "call.expr":
-                    caller = _enclosing_symbol(cap_node, tree.root_node, source, rel_path, graph)
-                    if caller is None:
-                        continue
-                    callee_name = _extract_call_name(cap_node, source)
-                    if callee_name is None:
-                        continue
-                    callee_id = _resolve_callee(callee_name, rel_path, graph)
-                    if callee_id:
-                        graph.add_edge(caller, callee_id, kind="calls",
-                                       line=cap_node.start_point[0] + 1)
-                    else:
-                        unresolved = f"<unknown>::{callee_name}"
-                        if not graph.has_node(unresolved):
-                            graph.add_node(unresolved, kind="unknown", file="<unknown>", line=0,
-                                           snippet=f"unresolved: {callee_name}")
-                        graph.add_edge(caller, unresolved, kind="calls",
-                                       line=cap_node.start_point[0] + 1)
+        for file_path in files:
+            try:
+                source = file_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
 
-        # --- imports ---
-        import_cur = _QueryCursor(import_q)
-        for cap_name, cap_nodes in import_cur.captures(tree.root_node).items():
-            for cap_node in cap_nodes:
-                if cap_name == "import.stmt":
-                    enclosing = _enclosing_module(tree.root_node, source, rel_path, graph)
-                    if enclosing is None:
-                        continue
-                    imported = cap_node.text.decode("utf-8")
-                    graph.add_edge(enclosing, f"<import>::{imported}", kind="imports",
-                                   line=cap_node.start_point[0] + 1, label=imported)
+            tree = parser.parse(source.encode("utf-8"))
+            rel_path = str(file_path.relative_to(workspace_root))
 
-        # --- inheritance ---
-        inherit_cur = _QueryCursor(inherit_q)
-        for cap_name, cap_nodes in inherit_cur.captures(tree.root_node).items():
-            for cap_node in cap_nodes:
-                if cap_name == "parent.name":
-                    parent_name = cap_node.text.decode("utf-8")
-                    # Find the class that has this parent.
-                    enclosing = _enclosing_symbol(cap_node, tree.root_node, source, rel_path, graph)
-                    if enclosing:
-                        parent_id = _resolve_callee(parent_name, rel_path, graph)
-                        if parent_id:
-                            graph.add_edge(enclosing, parent_id, kind="inherits",
-                                           line=cap_node.start_point[0] + 1)
+            # --- definitions (functions + classes) ---
+            if def_q:
+                def_cur = _QueryCursor(def_q)
+                for cap_name, cap_nodes in def_cur.captures(tree.root_node).items():
+                    for cap_node in cap_nodes:
+                        if cap_name in ("func.name",):
+                            node_text = cap_node.text.decode("utf-8")
+                            node_id = f"{rel_path}::{node_text}"
+                            graph.add_node(node_id, kind="function", file=rel_path,
+                                           line=cap_node.start_point[0] + 1,
+                                           snippet=_node_snippet(cap_node, source),
+                                           language=lang_name)
+                        elif cap_name in ("class.name",):
+                            node_text = cap_node.text.decode("utf-8")
+                            node_id = f"{rel_path}::{node_text}"
+                            graph.add_node(node_id, kind="class", file=rel_path,
+                                           line=cap_node.start_point[0] + 1,
+                                           snippet=_node_snippet(cap_node, source),
+                                           language=lang_name)
+
+            # --- calls ---
+            if call_q:
+                call_cur = _QueryCursor(call_q)
+                for cap_name, cap_nodes in call_cur.captures(tree.root_node).items():
+                    for cap_node in cap_nodes:
+                        if cap_name == "call.expr":
+                            caller = _enclosing_symbol(cap_node, tree.root_node, source, rel_path, graph, def_types)
+                            if caller is None:
+                                continue
+                            callee_name = _extract_call_name(cap_node, source, lang_name)
+                            if callee_name is None:
+                                continue
+                            callee_id = _resolve_callee(callee_name, rel_path, graph)
+                            if callee_id:
+                                graph.add_edge(caller, callee_id, kind="calls",
+                                               line=cap_node.start_point[0] + 1)
+                            else:
+                                unresolved = f"<unknown>::{callee_name}"
+                                if not graph.has_node(unresolved):
+                                    graph.add_node(unresolved, kind="unknown", file="<unknown>", line=0,
+                                                   snippet=f"unresolved: {callee_name}",
+                                                   language=lang_name)
+                                graph.add_edge(caller, unresolved, kind="calls",
+                                               line=cap_node.start_point[0] + 1)
+
+            # --- imports ---
+            if import_q:
+                import_cur = _QueryCursor(import_q)
+                for cap_name, cap_nodes in import_cur.captures(tree.root_node).items():
+                    for cap_node in cap_nodes:
+                        if cap_name == "import.stmt":
+                            enclosing = _enclosing_module(tree.root_node, source, rel_path, graph, lang_name)
+                            if enclosing is None:
+                                continue
+                            imported = cap_node.text.decode("utf-8")
+                            graph.add_edge(enclosing, f"<import>::{imported}", kind="imports",
+                                           line=cap_node.start_point[0] + 1, label=imported)
+
+            # --- inheritance ---
+            if inherit_q:
+                inherit_cur = _QueryCursor(inherit_q)
+                for cap_name, cap_nodes in inherit_cur.captures(tree.root_node).items():
+                    for cap_node in cap_nodes:
+                        if cap_name == "parent.name":
+                            parent_name = cap_node.text.decode("utf-8")
+                            enclosing = _enclosing_symbol(cap_node, tree.root_node, source, rel_path, graph, def_types)
+                            if enclosing:
+                                parent_id = _resolve_callee(parent_name, rel_path, graph)
+                                if parent_id:
+                                    graph.add_edge(enclosing, parent_id, kind="inherits",
+                                                   line=cap_node.start_point[0] + 1)
+                        elif cap_name == "class.def" and lang_name in ("javascript", "typescript"):
+                            # JS/TS: manually walk class_declaration children for class_heritage → identifier
+                            class_name = _extract_class_name(cap_node)
+                            parent_name = _extract_js_parent(cap_node)
+                            if class_name and parent_name:
+                                class_id = f"{rel_path}::{class_name}"
+                                parent_id = _resolve_callee(parent_name, rel_path, graph)
+                                if parent_id and graph.has_node(class_id):
+                                    graph.add_edge(class_id, parent_id, kind="inherits",
+                                                   line=cap_node.start_point[0] + 1)
 
     return graph
 
+
+
+
+def _extract_class_name(node: Any) -> str | None:
+    """Extract the class name from a class_declaration node."""
+    for child in node.children:
+        if child.type in ("identifier", "type_identifier"):
+            return child.text.decode("utf-8")
+    return None
+
+
+def _extract_js_parent(node: Any) -> str | None:
+    """Walk a class_declaration node to find the parent class in extends clause.
+
+    JS/TS AST: class_declaration → class_heritage → identifier (the parent name).
+    """
+    for child in node.children:
+        if child.type == "class_heritage":
+            for gc in child.children:
+                if gc.type == "identifier":
+                    return gc.text.decode("utf-8")
+    return None
 
 def _node_snippet(node: Any, source: str) -> str:
     """Extract the first line of a node as a snippet."""
@@ -211,14 +412,19 @@ def _node_snippet(node: Any, source: str) -> str:
 
 
 def _enclosing_symbol(node: Any, root: Any, source: str, rel_path: str,
-                      graph: nx.DiGraph) -> str | None:
-    """Walk up the tree to find the enclosing function or class."""
+                      graph: nx.DiGraph,
+                      def_types: tuple[str, ...] = ("function_definition", "class_definition")) -> str | None:
+    """Walk up the tree to find the enclosing function or class.
+
+    def_types is language-specific — JS uses function_declaration, Rust uses
+    function_item, etc. Defaults to Python's types for backward compatibility.
+    """
     current: Any | None = node
     while current is not None:
-        if current.type in ("function_definition", "class_definition"):
-            # Find the name child.
+        if current.type in def_types:
+            # Find the name child (varies by language: identifier, property_identifier, type_identifier).
             for child in current.children:
-                if child.type == "identifier":
+                if child.type in ("identifier", "property_identifier", "type_identifier", "field_identifier"):
                     name = child.text.decode("utf-8")
                     return f"{rel_path}::{name}"
             break
@@ -232,25 +438,44 @@ def _enclosing_symbol(node: Any, root: Any, source: str, rel_path: str,
 
 
 def _enclosing_module(root: Any, source: str, rel_path: str,
-                      graph: nx.DiGraph) -> str | None:
+                      graph: nx.DiGraph, lang_name: str = "") -> str | None:
     """Get the module-level node for a file."""
     module_id = f"{rel_path}::<module>"
     if not graph.has_node(module_id):
         graph.add_node(module_id, kind="module", file=rel_path, line=1,
-                       snippet=f"module {rel_path}")
+                       snippet=f"module {rel_path}", language=lang_name)
     return module_id
 
 
-def _extract_call_name(node: Any, source: str) -> str | None:
-    """Extract the callee name from a call expression."""
+def _extract_call_name(node: Any, source: str, lang_name: str = "python") -> str | None:
+    """Extract the callee name from a call expression.
+
+    Handles Python (call→identifier/attribute), JS/TS (call_expression→identifier/member_expression),
+    Rust (call_expression→identifier/field_expression), and Go (call_expression→identifier/selector_expression).
+    """
     for child in node.children:
-        if child.type == "identifier":
+        if child.type in ("identifier",):
             return child.text.decode("utf-8")
-        elif child.type == "attribute":
-            # obj.method() — return method name
+        elif child.type in ("attribute",):
+            # Python: obj.method() — return method name
             ids = [c.text.decode("utf-8") for c in child.children if c.type == "identifier"]
             if ids:
                 return ids[-1]
+        elif child.type in ("member_expression",):
+            # JS/TS: obj.method() — return property name
+            for c in child.children:
+                if c.type in ("property_identifier",):
+                    return c.text.decode("utf-8")
+        elif child.type in ("field_expression",):
+            # Rust: obj.method()
+            for c in child.children:
+                if c.type in ("field_identifier",):
+                    return c.text.decode("utf-8")
+        elif child.type in ("selector_expression",):
+            # Go: obj.method()
+            for c in child.children:
+                if c.type in ("field_identifier",):
+                    return c.text.decode("utf-8")
     return None
 
 
@@ -304,21 +529,23 @@ class GraphBuilder:
             self._staleness[workspace_root] = (now, False)
             return False
 
-        # Walk all .py files — stop early if any is newer than the cache.
+        # Walk all supported source files — stop early if any is newer than the cache.
         try:
-            for py_file in ws_path.rglob("*.py"):
-                # Skip hidden dirs and caches.
-                parts = py_file.parts
-                if any(p.startswith(".") for p in parts):
-                    continue
-                if "__pycache__" in str(py_file):
-                    continue
-                try:
-                    if py_file.stat().st_mtime > cache_mtime:
-                        self._staleness[workspace_root] = (now, True)
-                        return True
-                except OSError:
-                    continue
+            for ext, lang in _EXT_TO_LANG.items():
+                if _load_lang_module(lang) is None:
+                    continue  # Grammar not installed — skip this language.
+                for sf in ws_path.rglob(f"*{ext}"):
+                    parts = sf.parts
+                    if any(p.startswith(".") for p in parts):
+                        continue
+                    if any(skip in parts for skip in ("node_modules", "__pycache__", "target", "vendor")):
+                        continue
+                    try:
+                        if sf.stat().st_mtime > cache_mtime:
+                            self._staleness[workspace_root] = (now, True)
+                            return True
+                    except OSError:
+                        continue
         except (OSError, PermissionError):
             pass  # Can't walk — assume not stale (don't force a rebuild).
 

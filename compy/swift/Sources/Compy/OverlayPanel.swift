@@ -237,45 +237,49 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.titlebarAppearsTransparent = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.contentView = NSHostingView(rootView: OverlayView().environmentObject(state))
         panel.isReleasedWhenClosed = false
         panel.delegate = self  // click-outside → dismiss
 
-        // Cinematic intro: panel starts at final position (top-right) with clear
-        // background. Only the face is visible — close button hidden, input bar
-        // opacity 0. The face pops in big at screen center via an offset, then
-        // glides smoothly to its corner position. After reaching the corner, the
-        // full UI fades in.
+        // Cinematic intro: panel starts fullscreen with clear background so the
+        // face can animate at screen center without being clipped by window bounds.
+        // After intro, panel shrinks to top-right 600×72.
         panel.isOpaque = false
         panel.backgroundColor = .clear
         // Hide the close button during intro — only the face should be visible.
         panel.standardWindowButton(.closeButton)?.isHidden = true
-        // Panel is already fullscreen — no repositioning needed.
-        // Face will appear at screen center (the center of the fullscreen panel).
+        // §2: Diagnostic logging — log computed frames and opacity properties.
+        let finalW: CGFloat = 600
+        let finalH: CGFloat = 72
+        let finalFrame = NSRect(
+            x: screenFrame.maxX - finalW - 16,
+            y: screenFrame.maxY - finalH - 16,
+            width: finalW, height: finalH
+        )
+        // Set intro face positions BEFORE creating the hosting view so SwiftUI
+        // reads the correct values on first render — not .zero (top-left corner).
         state.introFaceStart = CGPoint(x: screenFrame.width / 2, y: screenFrame.height / 2)
-        // Where the face ends up: the corner position of the final 600×72 panel.
-        // Final panel will be at (maxX-616, maxY-88); face at (61,15) within it
-        // = screen position (maxX-555, maxY-73).
-        // SwiftUI y=0 is at TOP. Final panel at (maxY-88), face at y=15 within it
-        // → screen y = maxY-73 → SwiftUI y = maxY - (maxY-73) = 73.
         state.introFaceEnd = CGPoint(x: screenFrame.width - 555, y: 73)
+        // Now create the hosting view with positions already set.
+        panel.contentView = NSHostingView(rootView: OverlayView().environmentObject(state))
         panel.makeKeyAndOrderFront(nil)
 
         // Phase 1: face pops in at 3x → 1x (handled by SwiftUI).
-        // Panel is visible (alpha=1) on clear background — face is the only
-        // visible element since close button is hidden and input bar has opacity 0.
-        // Phase 2: after 0.5s, face glides from screen center to corner.
-        // Phase 3: after 1.0s, reveal background + chrome + contents.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
-            // Shrink panel to final top-right position.
-            let finalW: CGFloat = 600
-            let finalH: CGFloat = 72
-            var frame = panel.frame
-            frame.origin.x = screenFrame.maxX - finalW - 16
-            frame.origin.y = screenFrame.maxY - finalH - 16
-            frame.size.width = finalW
-            frame.size.height = finalH
-            panel.setFrame(frame, display: true, animate: true)
+        // Phase 2: at 0.5s, face glides to corner AND panel shrinks — simultaneous.
+        // Phase 3: at 0.75s, reveal background + chrome + contents.
+        // §6: Motion tuned to 300ms ease-out with reduce-motion support.
+        // §5: Translucency fix — isOpaque + solid backgroundColor.
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let shrinkDelay: Double = reduceMotion ? 0.0 : 0.5
+        let shrinkDuration: Double = reduceMotion ? 0.0 : 0.3
+        let revealDelay: Double = reduceMotion ? 0.0 : 0.85
+        DispatchQueue.main.asyncAfter(deadline: .now() + shrinkDelay) {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = shrinkDuration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().setFrame(finalFrame, display: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + revealDelay) {
             panel.backgroundColor = NSColor.windowBackgroundColor
             panel.isOpaque = true
             panel.standardWindowButton(.closeButton)?.isHidden = false
@@ -734,7 +738,8 @@ final class OverlayState: ObservableObject {
                 self.faceOpacity = 0
                 self.faceScale = 0.92
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self = self else { return }
                 self.baseFace = targetNow
                 // Open eyes now that the new face is revealed.
                 self.isBlinking = false
@@ -977,6 +982,9 @@ struct OverlayView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
+            // Fill the full hosting view so .position() coordinates map to
+            // the fullscreen panel, not a ~600×72 centered sub-rect (§4 fix).
+            Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(spacing: 0) {
                 inputBar
                 if shouldShowContent {
@@ -999,24 +1007,34 @@ struct OverlayView: View {
             // Phase 2: face glides from center to corner position.
             // Phase 3: intro done — panel shrinks to top-right, full UI reveals.
             if state.phase == .empty && introPhase != .done {
-                faceView(size: introFaceSize)
+                // Direct Text (not faceView) so .foregroundColor(.white) applies
+                // without being overridden by faceView's internal .foregroundColor.
+                Text(state.displayedFace)
+                    .font(.system(size: introFaceSize, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white)  // solid white on clear background (§5)
                     .scaleEffect(introPhase == .standalone ? introFaceScale : 1.0)
                     .position(introPhase == .sliding ? state.introFaceEnd : state.introFaceStart)
                     .onAppear {
-                        // Phase 1: face pops in big with spring.
-                        // Position is already correct via state.introFaceStart (no flash).
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
+                        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                        // §2: Diagnostic logging.
+                        // Phase 1: face pops in big with spring (§6: 300ms).
+                        let popDuration: Double = reduceMotion ? 0.0 : 0.3
+                        withAnimation(.spring(response: popDuration, dampingFraction: 0.6)) {
                             introFaceScale = 1.0
                         }
-                        // Phase 2: face glides from screen center to corner.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            withAnimation(.easeInOut(duration: 0.45)) {
+                        // Phase 2: face glides to corner (§6: 300ms ease-out).
+                        // Ends at 0.5+0.3=0.8s. Reveal fires at 0.85s for a clean handoff.
+                        let glideDelay: Double = reduceMotion ? 0.0 : 0.5
+                        let glideDuration: Double = reduceMotion ? 0.0 : 0.3
+                        DispatchQueue.main.asyncAfter(deadline: .now() + glideDelay) {
+                            withAnimation(.easeOut(duration: glideDuration)) {
                                 introPhase = .sliding
                                 introFaceSize = 18
                             }
                         }
-                        // Phase 3: intro complete — reveal full UI.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        // Phase 3: intro complete — swap to docked face (glide ends at 0.8s, +50ms cushion).
+                        let revealDelay: Double = reduceMotion ? 0.0 : 0.85
+                        DispatchQueue.main.asyncAfter(deadline: .now() + revealDelay) {
                             withAnimation(.easeOut(duration: 0.25)) {
                                 introPhase = .done
                             }

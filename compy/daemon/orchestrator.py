@@ -23,8 +23,9 @@ from .models import (
 from .parser import SYNONYM_MAP, _extract_trace_frames, _is_trace_input
 
 # Regex to pull a Python symbol name from a snippet (def/class).
-_SYMBOL_FROM_SNIPPET = re.compile(
-    r'\b(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)'
+# Multi-language symbol extraction — catches Python def/class, JS/TS function, Go/Rust func.
+_SYMBOL_FROM_SNIPPET_ML = re.compile(
+    r'\b(?:def|class|function|func)\s+([A-Za-z_][A-Za-z0-9_]*)'
 )
 
 # Smart grep patterns — generated per-intent, not hard-coded per-word.
@@ -55,6 +56,12 @@ DIRECT_HIT_MAX = 3
 
 # Cap on fuzzy retries — don't bash the disk with every stopword.
 MAX_FUZZY_KEYWORD_TRIES = 5
+
+# Cap on LSP-enriched candidates — LSP calls are 2s timeout each and the
+# bridge does 3 (definition/references/hover), so unbounded enrichment on a
+# large candidate set risks minutes of latency. Enrich only the top entries;
+# the rest still get graph + git enrichment.
+LSP_ENRICH_MAX = 8
 
 
 def run(
@@ -495,21 +502,22 @@ def _enrich_candidates_for_ranking(
             pass  # No cached graph — skip graph enrichment.
 
     enriched: list[GrepHit] = []
-    for c in candidates:
+    for idx, c in enumerate(candidates):
         ctx_parts: list[str] = []
 
+        # Extract symbol once for both graph and LSP enrichment.
+        symbol = _extract_symbol_from_snippet(c.snippet)
+
         # Graph relationships: callers/callees for the hit's symbol.
-        if graph_loaded:
-            symbol = _extract_symbol_from_snippet(c.snippet)
-            if symbol:
-                try:
-                    callers = grapher.query(symbol, intent="callers")  # type: ignore[union-attr]
-                    if callers:
-                        names = _caller_names(callers, max_items=3)
-                        if names:
-                            ctx_parts.append(f"Called by: {names}")
-                except Exception:
-                    pass  # Silently skip — enrichment is best-effort.
+        if graph_loaded and symbol:
+            try:
+                callers = grapher.query(symbol, intent="callers")  # type: ignore[union-attr]
+                if callers:
+                    names = _caller_names(callers, max_items=3)
+                    if names:
+                        ctx_parts.append(f"Called by: {names}")
+            except Exception:
+                pass  # Silently skip — enrichment is best-effort.
 
         # Git history: blame info — only for history/rationale queries.
         is_history_q = historian is not None and _looks_like_history_query(question)
@@ -522,6 +530,19 @@ def _enrich_candidates_for_ranking(
                         ctx_parts.append(f"git: {snippet}")
             except Exception:
                 pass
+
+        # LSP enrichment (§2-3, claude-response5): live semantic data from editor.
+        # Non-blocking — falls back silently on timeout/no-editor.
+        # symbol already extracted above — reuse.
+        # Capped to the top LSP_ENRICH_MAX candidates so large result sets
+        # can't blow the latency budget (3 calls × 2s timeout × N candidates).
+        if symbol and idx < LSP_ENRICH_MAX:
+            try:
+                from .lsp_bridge import enrich_with_lsp
+                lsp_ctx = enrich_with_lsp(symbol, file=c.file, line=c.line)
+                ctx_parts.extend(lsp_ctx)
+            except Exception:
+                pass  # LSP unavailable — gracefully skip.
 
         # Lightweight verification: snippet contains the expected kind of syntax.
         verified = _verify_snippet_kind(c.snippet)
@@ -633,18 +654,29 @@ def _verify_snippet_kind(snippet: str) -> str | None:
     """Lightweight check: what kind of code construct is this snippet?
 
     Returns a short label like 'def' or 'class' if the snippet starts with a
-    recognised definition keyword, so the reasoner knows this is a real definition
-    rather than a comment or a usage in a docstring.
+    recognised definition keyword. Supports Python, JS, TS, Go, and Rust patterns
+    so the reasoner gets richer per-language context after the multi-language
+    tree-sitter upgrade (claude-response5 §1).
     """
-    stripped = snippet.lstrip()
+    stripped = snippet.lstrip().lower()
+    # Python
     if stripped.startswith("def ") or stripped.startswith("async def "):
         return "def"
     if stripped.startswith("class "):
         return "class"
-    if stripped.startswith(("func ", "function ")):
-        return "func"
     if " = lambda" in stripped:
         return "lambda"
+    # JS/TS
+    if stripped.startswith("function ") or stripped.startswith("export function "):
+        return "function"
+    # Go
+    if stripped.startswith("func "):
+        return "func"
+    # Rust
+    if stripped.startswith("fn "):
+        return "fn"
+    if stripped.startswith("struct ") or stripped.startswith("enum ") or stripped.startswith("trait ") or stripped.startswith("impl "):
+        return "struct" if stripped.startswith("struct ") else stripped.split()[0]
     return None
 
 
@@ -690,8 +722,11 @@ def _boost_selection_file(
 
 
 def _extract_symbol_from_snippet(snippet: str) -> str | None:
-    """Pull a function/class name from a Python snippet like 'def foo():'."""
-    m = _SYMBOL_FROM_SNIPPET.search(snippet)
+    """Pull a function/class name from a snippet like 'def foo():' or 'function bar()'.
+
+    Uses multi-language regex to support Python, JS, TS, Go, and Rust patterns.
+    """
+    m = _SYMBOL_FROM_SNIPPET_ML.search(snippet)
     return m.group(1) if m else None
 
 
