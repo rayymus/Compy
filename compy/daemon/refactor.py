@@ -474,3 +474,213 @@ def undo_last() -> QueryResult:
         hits=(),
         reason=f"Undid {len(restored)} file{'s' if len(restored) != 1 else ''}: {', '.join(restored)}",
     )
+
+
+# ── Tier 3: Inline Suggestions (deterministic, no LLM) ───────────────────
+
+def _stage_single_file_edit(
+    file_path: str, original: str, formatted: str, intent: str,
+) -> QueryResult:
+    """Stage a single-file edit through the existing confirm/apply pipeline.
+
+    Reuses _make_token, _StagedEdit, and STAGE_DIR from the Tier 1-2 pipeline.
+    """
+    _cleanup_stale_staged()
+    if formatted == original:
+        return QueryResult(intent=intent, degraded=True, reason="No changes needed.")
+
+    token = _make_token()
+    staged = _StagedEdit(file=file_path, original=original, formatted=formatted)
+    stage_path = STAGE_DIR / f"compy-staged-{token}.json"
+    stage_path.write_text(json.dumps(asdict(staged)), encoding="utf-8")
+
+    changed = abs(original.count("\n") - formatted.count("\n")) + 1
+    return QueryResult(
+        intent=intent,
+        refactor_proposals=(FileProposal(file=file_path, changed_lines=changed),),
+        refactor_token=token,
+        reason=f"Staged {intent}. Enter to confirm, Esc to reject.",
+    )
+
+
+def stage_extract_variable(
+    selection: Selection, workspace: str
+) -> QueryResult | None:
+    """Extract selected expression to 'extracted_var' on the preceding line.
+
+    Deterministic, no LLM. Simple string manipulation: find the line containing
+    the selection, insert variable assignment above, replace expression.
+    """
+    sel_file = selection.file
+    sel_line = selection.line
+    sel_text = selection.text
+    if not sel_file or not sel_line or not sel_text:
+        return None
+
+    expr = sel_text.strip()
+    if not expr or "\n" in expr:
+        return None  # multi-line selection not supported in v1
+
+    file_path = Path(workspace).resolve() / sel_file
+    try:
+        original = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    lines = original.splitlines()
+    target_idx = sel_line - 1
+    if target_idx < 0 or target_idx >= len(lines):
+        return None
+
+    line_text = lines[target_idx]
+    if expr not in line_text:
+        return None  # expression not found on target line
+
+    indent = line_text[:len(line_text) - len(line_text.lstrip())]
+    var_name = _suggest_variable_name(expr)
+
+    # Replace ONLY the first occurrence — avoids corrupting the line
+    # if the expression text appears multiple times.
+    new_line = line_text.replace(expr, var_name, 1)
+    new_assignment = f"{indent}{var_name} = {expr}"
+
+    lines[target_idx] = new_line
+    lines.insert(target_idx, new_assignment)
+
+    trailing = "\n" if original.endswith("\n") else ""
+    formatted = "\n".join(lines) + trailing
+
+    return _stage_single_file_edit(
+        str(file_path), original, formatted, intent="extract_variable",
+    )
+
+
+def _suggest_variable_name(expr: str) -> str:
+    """Heuristic variable name from expression. Returns a readable name."""
+    # Strip parens, brackets, and common wrappers.
+    clean = expr.strip().lstrip("({").rstrip(")}")
+    # If it's a function call, use the function name.
+    if "(" in clean:
+        return clean.split("(")[0].strip().split(".")[-1] + "_result"
+    # If it looks like a computation, use 'result'.
+    if any(op in clean for op in ("+", "-", "*", "/", "%", "&", "|")):
+        return "result"
+    # Fallback: snake_case, truncated. Ensure result is a valid Python identifier.
+    name = clean.replace(".", "_").replace("[", "_").replace("]", "")
+    name = name[:20].strip("_") or "extracted"
+    # Guard: bare numbers and other non-identifiers.
+    if not name.isidentifier():
+        return "extracted"
+    return name
+
+
+def stage_add_type_hints(
+    selection: Selection, workspace: str
+) -> QueryResult | None:
+    """Add basic type hints (-> None, arg: Any) to the selected function.
+
+    Uses tree-sitter Python grammar to parse the function definition
+    and insert missing type annotations. Deterministic, no LLM.
+    """
+    sel_file = selection.file
+    sel_line = selection.line
+    if not sel_file or not sel_line:
+        return None
+
+    try:
+        import tree_sitter_python as tspython
+        from tree_sitter import Language, Parser
+    except Exception:
+        return None  # tree-sitter unavailable
+
+    file_path = Path(workspace).resolve() / sel_file
+    try:
+        original_bytes = file_path.read_bytes()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    lang = Language(tspython.language())
+    parser = Parser(lang)
+    tree = parser.parse(original_bytes)
+
+    # Find the function_definition node that contains the target line.
+    # Convert line number to approximate byte offset.
+    lines = original_bytes.split(b"\n")
+    if sel_line < 1 or sel_line > len(lines):
+        return None
+    target_byte = sum(len(l) + 1 for l in lines[:sel_line - 1])
+
+    func_node = _find_function_at(tree.root_node, target_byte, lines)
+    if func_node is None:
+        return None
+
+    # Collect replacements: (start_byte, old_bytes, new_bytes).
+    # Apply bottom-up (reverse sort) to preserve byte offsets.
+    repls: list[tuple[int, int, bytes]] = []
+
+    # 1. Parameters: add ': Any' after each bare identifier param.
+    params_node = func_node.child_by_field_name("parameters")
+    if params_node is not None:
+        for child in params_node.children:
+            if child.type == "identifier":
+                # Check if this parameter already has a type annotation.
+                # In tree-sitter Python's CST, the next *named* sibling
+                # after an identifier param is the 'type' node.
+                # We check next_named_sibling (not next_sibling) because
+                # the immediate next sibling is the ':' anonymous node.
+                nns = child.next_named_sibling
+                has_type = nns is not None and nns.type == "type"
+                if not has_type:
+                    end = child.end_byte
+                    repls.append((end, b"", b": Any"))
+
+    # 2. Return type: add ' -> None' before the colon if missing.
+    return_type = func_node.child_by_field_name("return_type")
+    if return_type is None:
+        # Find the closing paren of parameters and insert before the colon.
+        if params_node is not None:
+            # The colon is right after the parameters.
+            colon_pos = params_node.end_byte
+            # Skip whitespace to find actual colon position.
+            i = colon_pos
+            while i < len(original_bytes) and original_bytes[i:i + 1] in (b" ", b"\t"):
+                i += 1
+            if i < len(original_bytes) and original_bytes[i:i + 1] == b":":
+                repls.append((i, b"", b" -> None"))
+
+    if not repls:
+        return None  # nothing to add
+
+    # Apply bottom-up.
+    repls.sort(key=lambda r: r[0], reverse=True)
+    result = bytearray(original_bytes)
+    for pos, old, new in repls:
+        result[pos:pos + len(old)] = new
+
+    formatted = result.decode("utf-8")
+    return _stage_single_file_edit(
+        str(file_path), original_bytes.decode("utf-8"), formatted,
+        intent="add_type_hints",
+    )
+
+
+def _find_function_at(
+    node, target_byte: int, lines: list[bytes],
+) -> "Node | None":  # type: ignore[name-defined]
+    """Find the innermost function_definition node containing target_byte.
+
+    Searches children first so nested functions are found before their
+    enclosing parents. The ``lines`` parameter is unused — kept for API
+    consistency with potential future line-based filters.
+    """
+    _ = lines  # ponytail: unused parameter, kept for API stability
+    # Search children first — nested functions take priority.
+    for child in node.children:
+        result = _find_function_at(child, target_byte, lines)
+        if result is not None:
+            return result
+    # Then check current node.
+    if node.type == "function_definition":
+        if node.start_byte <= target_byte <= node.end_byte:
+            return node
+    return None

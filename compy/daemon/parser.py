@@ -53,6 +53,9 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     (r"\brename\s+([\w]+)\s+to\s+([\w]+)", "rename"),
     # Format / refactor: "format this file", "format the code", "/undo", "/confirm".
     (r"\bformat (this|the) (file|code|selection)\b|^/(?:undo|confirm)\b", "format"),
+    # Tier 3 inline suggestions — deterministic, tree-sitter/regex based, no LLM.
+    (r"\bextract (this )?(expression|variable)\b", "extract_variable"),
+    (r"\badd type hints?\b|\btype hint (this |the )?(function|method)\b", "add_type_hints"),
     # Fuzzy: catch-all for natural-language search.
     (r"\bwhere is\b|\bfind\b|\bwhat (does|is|handles?)\b", "fuzzy"),
 )
@@ -326,14 +329,24 @@ class RuleBasedParser:
         # (Previously downgraded to fuzzy — now explain works standalone.)
         # Pre-extract keywords once — graph_path needs them for symbol extraction.
         _pre_keywords = _extract_keywords(question) if intent in ("fuzzy", "convention", "dedup", "overview", "graph_path", "explain") else ()
-        # explain: when no selection, use the first contentful keyword as symbol.
-        # Skip common query-intent words like "explain", "find", "show", etc.
+        # explain: when no selection, extract symbol from ORIGINAL question text
+        # (before CamelCase splitting) so compound names like "sendSelectionEnvelope"
+        # stay intact. Use the regex that matched the intent to capture the symbol.
         _QUERY_WORDS = frozenset({"explain", "find", "show", "search", "tell", "what", "how", "where", "give", "list", "look", "get", "check", "describe"})
         if intent == "explain" and not has_sel and not symbol:
-            syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw and kw not in _QUERY_WORDS]
-            if syms:
-                symbol = syms[0]
-                confidence = max(confidence, 0.75)
+            # Extract from original (pre-lowercase) text: find "explain <symbol>".
+            m = re.search(r"\bexplain\s+(?!this\b)(\w+)", question, re.IGNORECASE)
+            if m:
+                raw_symbol = m.group(1)
+                if len(raw_symbol) >= 2 and raw_symbol.lower() not in _QUERY_WORDS:
+                    symbol = raw_symbol
+                    confidence = max(confidence, 0.75)
+            # Fallback: use keywords if regex didn't find a standalone symbol.
+            if not symbol:
+                syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw and kw not in _QUERY_WORDS]
+                if syms:
+                    symbol = syms[0]
+                    confidence = max(confidence, 0.75)
         # graph_path: extract two symbols from keywords (longest non-stopword tokens).
         if intent == "graph_path":
             syms = [kw for kw in _pre_keywords if len(kw) >= 2 and " " not in kw][:2]

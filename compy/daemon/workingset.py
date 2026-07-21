@@ -29,6 +29,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from time import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -48,6 +49,8 @@ MAX_NEXT_QUESTIONS = 3
 PR_ALPHA = 0.85             # PageRank damping factor
 BIAS_BLEND = 0.2            # 80% original score + 20% activation bias
 NODE_LINE_TOLERANCE = 5     # lines of slack when mapping hit→graph node
+MAX_GRAPH_NODES = 5000      # skip full pagerank above this node count
+INACTIVITY_RESET_SECONDS = 30 * 60  # hard-reset activation after 30 min idle
 
 
 # ─── Path helpers ──────────────────────────────────────────────────────────
@@ -87,6 +90,7 @@ class WorkingSet:
         self._activation: dict[str, float] = {}
         self._recent_keywords: list[str] = []
         self._turn_count: int = 0
+        self._last_updated: float = 0.0  # epoch seconds — written on save, checked on load
         # Cache: {(file, line): node_id} built lazily by _resolve_node_cached.
         self._node_index: dict[tuple[str, int], str] | None = None
 
@@ -103,6 +107,15 @@ class WorkingSet:
             }
             ws._recent_keywords = list(data.get("recent_keywords", []))
             ws._turn_count = int(data.get("turn_count", 0))
+            ws._last_updated = float(data.get("last_updated", 0))
+            # Hard-reset activation if the working set sat idle too long.
+            # Decay is per-turn, but real time passing matters: 3 queries
+            # yesterday shouldn't bias what feels like a new session today.
+            if ws._last_updated > 0:
+                idle = (time() - ws._last_updated)
+                if idle > INACTIVITY_RESET_SECONDS:
+                    ws._activation = {}
+                    ws._recent_keywords = []
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass  # cold start — empty working set
         return ws
@@ -110,12 +123,14 @@ class WorkingSet:
     def save(self) -> None:
         """Write to tmp file. Best-effort — never blocks the query."""
         try:
+            self._last_updated = time()
             _ws_path(self.workspace).write_text(
                 json.dumps({
                     "workspace": self.workspace,
                     "activation": self._activation,
                     "recent_keywords": self._recent_keywords[-MAX_RECENT_KEYWORDS:],
                     "turn_count": self._turn_count,
+                    "last_updated": self._last_updated,
                 }),
                 "utf-8",
             )
@@ -213,8 +228,13 @@ class WorkingSet:
     def _resolve_node(
         file: str, line: int, graph: nx.DiGraph
     ) -> str | None:
-        """Map a (file, line) to the closest graph node ID.
+        """DEPRECATED — use _resolve_node_cached (O(1) cached lookups).
 
+        Kept for backward compatibility with any external callers. All internal
+        call sites should use the instance method _resolve_node_cached instead,
+        which builds a file+line index once and reuses it across calls.
+
+        Map a (file, line) to the closest graph node ID.
         Graph nodes are ``"rel_path::symbol"`` with ``file`` and ``line`` attrs.
         Returns the closest node within NODE_LINE_TOLERANCE lines, or None.
         """
@@ -266,6 +286,11 @@ class WorkingSet:
         graph has no activation to bias toward.
         """
         if not self._activation or graph.number_of_nodes() == 0:
+            return {}
+
+        # Skip full pagerank for large graphs — O(|V|+|E|) may breach the
+        # sub-second budget. Fall through to _bias_raw (no propagation).
+        if graph.number_of_nodes() > MAX_GRAPH_NODES:
             return {}
 
         # Build personalization dict: map file:line → node_id, accumulate scores.
@@ -330,6 +355,10 @@ class WorkingSet:
 
         biased: list[RankedHit] = []
         personalized = False
+        # Track original ordering to detect rank-order change.
+        # Only set personalized=True when the ranking order actually shifts —
+        # not when every node gets a nonzero bias that doesn't change ranking.
+        original_order = [h.file + ":" + str(h.line) for h in hits]
         for hit in hits:
             file = _norm_file(hit.file, self.workspace)
             node_id = self._resolve_node_cached(file, hit.line, graph)
@@ -344,6 +373,9 @@ class WorkingSet:
             biased.append(replace(hit, score=min(new_score, 1.0)))
 
         biased.sort(key=lambda h: h.score, reverse=True)
+        # Check if the ranking order actually changed (not just scores shifted).
+        new_order = [h.file + ":" + str(h.line) for h in biased]
+        personalized = personalized and (new_order != original_order)
         return tuple(biased), personalized
 
     def _bias_raw(
@@ -352,6 +384,7 @@ class WorkingSet:
         """Fallback: use raw activation scores without graph propagation."""
         biased: list[RankedHit] = []
         personalized = False
+        original_order = [h.file + ":" + str(h.line) for h in hits]
         max_act = max(self._activation.values()) if self._activation else 0
         if max_act <= 0:
             return hits, False
@@ -369,6 +402,8 @@ class WorkingSet:
             biased.append(replace(hit, score=min(new_score, 1.0)))
 
         biased.sort(key=lambda h: h.score, reverse=True)
+        new_order = [h.file + ":" + str(h.line) for h in biased]
+        personalized = personalized and (new_order != original_order)
         return tuple(biased), personalized
 
     # ── Next-question suggestions ──────────────────────────────────────────

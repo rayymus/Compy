@@ -290,7 +290,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         // Set intro face positions BEFORE creating the hosting view so SwiftUI
         // reads the correct values on first render — not .zero (top-left corner).
         state.introFaceStart = CGPoint(x: screenFrame.width / 2, y: screenFrame.height / 2)
-        state.introFaceEnd = CGPoint(x: screenFrame.width - 555, y: 73)
+        // introFaceEnd matches the docked face position: .padding(.leading, 52) + half of 18pt mono face (~27pt wide / 2 ≈ 13.5)
+        // and .padding(.top, 6) + half of 18pt line height (~18pt / 2 = 9). Both within the fullscreen panel's coordinate space.
+        state.introFaceEnd = CGPoint(x: 65, y: 15)
         // Now create the hosting view with positions already set.
         panel.contentView = NSHostingView(rootView: OverlayView().environmentObject(state))
         panel.makeKeyAndOrderFront(nil)

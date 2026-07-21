@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 from .gitlog import GitHistory
-from .graphify import GraphQuerier, cache_exists
+from .graphify import GraphQuerier
 from .grepper import RipgrepGrepper
 from .heuristic_reasoner import HeuristicReasoner
 from .models import QueryRequest, to_json
@@ -62,9 +62,10 @@ def main(argv: list[str] | None = None) -> int:
 
     reasoners = _build_reasoners(args.reasoner)
 
-    # Build Graphify querier — only when cache exists or explicitly requested.
-    # tree-sitter version mismatches can cause SIGABRT crashes that except Exception
-    # cannot catch, so we never trigger _build_graph() on the hot query path.
+    # Build Graphify querier — always initialized so overview/explain/rename/
+    # dead_code queries work. Uses fast_only=True by default (loads cached graph
+    # without rebuilding). Only force-rebuilds when --graph-rebuild is passed.
+    # If no cache exists, grapher exists but queries gracefully return empty.
     grapher: GraphQuerier | None = None
     historian: GitHistory | None = None
     if request.selection:
@@ -72,12 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ws = "."
 
-    if args.graph_rebuild or cache_exists(ws):
-        try:
-            grapher = GraphQuerier()
-            grapher.load(ws, force_rebuild=args.graph_rebuild)
-        except Exception:
-            grapher = None  # Graph not available — relational queries fall through.
+    try:
+        grapher = GraphQuerier()
+        grapher.load(ws, force_rebuild=args.graph_rebuild, fast_only=not args.graph_rebuild)
+    except Exception:
+        grapher = None  # Graph not available — overview/explain/rename fall through.
 
     historian = GitHistory()
 

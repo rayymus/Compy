@@ -169,6 +169,29 @@ def _evaluate(
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
+    # --- Tier 3 inline suggestions: extract variable, add type hints ---
+    # Deterministic, no LLM. Uses tree-sitter for add_type_hints, simple
+    # string manipulation for extract_variable. Shares the stage/confirm/apply
+    # pipeline with Tier 1-2 refactoring.
+    if parsed.intent in ("extract_variable", "add_type_hints"):
+        from .refactor import stage_extract_variable, stage_add_type_hints
+        if not selection or not selection.file:
+            return parsed, (), True, (
+                f"{parsed.intent} requires an active file selection."
+            )
+        func = (
+            stage_extract_variable
+            if parsed.intent == "extract_variable"
+            else stage_add_type_hints
+        )
+        result = func(selection, workspace)
+        if result is not None:
+            return parsed, result.hits, result.degraded, result.reason
+        return parsed, (), True, (
+            f"Could not {parsed.intent} — syntax not supported "
+            f"or tree-sitter unavailable."
+        )
+
     # --- Rename path: graph-verified identifier rename ---
     if parsed.intent == "rename" and grapher is not None:
         symbol = parsed.symbol

@@ -88,31 +88,22 @@ final class HotkeyManager {
                 }
             }
 
-            // Cross-check via AX — try the frontmost app first, then scan all.
-            // When two Antigravity windows are open (different projects), both
-            // extensions write to the same shared file — whichever wrote last
-            // wins, but the workspaceRoot may be from the WRONG window.
+            // AX fallback: only use Accessibility API when the extension didn't
+            // provide a workspaceRoot. The extension writes proactively on window
+            // focus, editor change, and workspace-folder change — it is the
+            // authoritative source. AX is unreliable on Electron editors (missing
+            // document attributes) and can return paths from unrelated background
+            // apps (Terminal, Finder), silently clobbering the correct root.
             //
-            // Option D (Session 26): when AX and extension disagree, trust the
-            // more specific path. If extension's workspace is a subdirectory of
-            // what AX found, the extension is correct (e.g. AX finds "Desktop/"
-            // from Finder, but extension correctly says "Desktop/garden_warriors/").
-            // Only trust AX when the paths are completely distinct projects
-            // (the multi-window race condition).
-            if let axRoot = Self.resolveWorkspaceViaFrontmostEditor(),
-               axRoot != "/" {  // never trust filesystem root
-                if let extRoot = workspaceRoot, axRoot != extRoot {
-                    if extRoot.hasPrefix(axRoot + "/") {
-                        // Extension is a subdirectory — more specific, keep it.
-                        Self._debugAXLog("AX: keeping extension=\(extRoot), more specific than frontmost=\(axRoot)")
-                    } else {
-                        // Paths are completely distinct — multi-window race, trust AX.
-                        Self._debugAXLog("AX-override: extension=\(extRoot) frontmost=\(axRoot) — trusting frontmost (distinct paths)")
-                        workspaceRoot = axRoot
-                    }
-                } else if workspaceRoot == nil {
-                    workspaceRoot = axRoot
-                }
+            // The multi-window shared-file race (two editor windows competing
+            // for /tmp/compy-selection.json) is a real but rare case. Its fix
+            // (AX cross-check) caused more breakage than the race itself. When
+            // the extension is connected, trust it.
+            if workspaceRoot == nil,
+               let axRoot = Self.resolveWorkspaceViaFrontmostEditor(),
+               axRoot != "/" {
+                Self._debugAXLog("AX-fallback: no extension root, using frontmost=\(axRoot)")
+                workspaceRoot = axRoot
             }
             OverlayController.shared.toggle(
                 selectedText: selectionText,
