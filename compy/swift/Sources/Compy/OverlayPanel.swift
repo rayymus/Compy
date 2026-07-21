@@ -2447,7 +2447,11 @@ struct OverlayView: View {
                             if let nl = text.firstIndex(of: "\n") {
                                 let firstLine = String(text[..<nl])
                                 if let lineData = firstLine.data(using: .utf8),
-                                   let event = try? compyDecoder.decode(StreamEvent.self, from: lineData),
+                                   let wrapper = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                                   wrapper["type"] as? String == "stream",
+                                   let payload = wrapper["payload"] as? [String: Any],
+                                   let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                                   let event = try? compyDecoder.decode(StreamEvent.self, from: payloadData),
                                    event.stream == "candidates" {
                                     streamedCount = event.count
                                     _debugLog("streamed \(event.count) candidates to overlay")
@@ -2485,10 +2489,27 @@ struct OverlayView: View {
 
                 _debugLog("daemon exit=\(exitCode) outBytes=\(outData.count) stderr=\(stderrStr)")
 
-                // Decode the last JSON line as the final QueryResult.
+                // NDJSON framing: filter lines by type field instead of fragile lines.last.
+                // Each line is {"type": "stream"|"result", "payload": {...}}.
+                // Falls back to the last line (legacy mode) if no "result"-typed line found.
                 let text = String(data: outData, encoding: .utf8) ?? ""
                 let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
-                let finalData = lines.last?.data(using: .utf8) ?? outData
+                let resultLine = lines.last(where: { line in
+                    if let data = line.data(using: .utf8),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        return dict["type"] as? String == "result"
+                    }
+                    return false
+                })
+                let resultPayload: Data?
+                if let rl = resultLine,
+                   let dict = try? JSONSerialization.jsonObject(with: rl.data(using: .utf8)!) as? [String: Any],
+                   let payload = dict["payload"] as? [String: Any] {
+                    resultPayload = try? JSONSerialization.data(withJSONObject: payload)
+                } else {
+                    resultPayload = nil
+                }
+                let finalData = resultPayload ?? lines.last?.data(using: .utf8) ?? outData
 
                 if exitCode != 0 {
                     let reason = stderrStr.isEmpty ? "daemon exit \(exitCode)" : "daemon: \(stderrStr)"

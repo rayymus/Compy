@@ -98,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
             "score": round(h.score, 3), "source": h.source,
         } for h in ranked]
         print(json.dumps({
-            "stream": "candidates", "hits": hits, "count": len(candidates),
+            "type": "stream",
+            "payload": {
+                "stream": "candidates", "hits": hits, "count": len(candidates),
+            }
         }), flush=True)
 
     result = run_pipeline(
@@ -110,7 +113,10 @@ def main(argv: list[str] | None = None) -> int:
         historian=historian,
         on_candidates=_stream_candidates,
     )
-    print(to_json(result))
+    # NDJSON framing: wrap every line with a type field so the Swift side
+    # can filter by type instead of relying on fragile lines.last.
+    from dataclasses import asdict
+    print(json.dumps({"type": "result", "payload": asdict(result)}, default=str))
     return 0
 
 

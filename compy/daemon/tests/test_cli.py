@@ -32,7 +32,10 @@ def test_cli_roundtrip_zero_hits_demotes_to_fuzzy(tmp_path: Path):
         cwd=str(PROJECT_ROOT),
     )
     assert proc.returncode == 0, f"stderr=\n{proc.stderr}"
-    out = json.loads(proc.stdout)
+    # NDJSON framing: stdout is {"type": "result", "payload": {...}}
+    envelope = json.loads(proc.stdout)
+    assert envelope["type"] == "result"
+    out = envelope["payload"]
     # Spec §2a: empty workspace yields zero grep hits on the structured path, which the
     # orchestrator demotes to the fuzzy branch. With the question's only keyword being
     # "ability" / "used" (and no matching files in tmp_path either), the fuzzy branch
