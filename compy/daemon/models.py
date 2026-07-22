@@ -106,18 +106,21 @@ class QueryResult:
     # Working Set Engine — Session 34
     next_questions: tuple[str, ...] | None = None  # "X is called in N places — see them?"
     personalization_active: bool = False  # True when ranking was biased by recent context
+    # Explain / chat — Session 42: prose synthesis for conversational answers
+    explanation: str | None = None  # prose text for explain/overview intents
 
 
 @dataclass(frozen=True)
 class FileProposal:
     """A single file change proposal in a refactoring operation.
 
-    Lightweight — just the file path and a change summary.  Full diffs are
-    reviewed in the editor, not rendered inside the overlay.
+    Includes a unified diff preview so the overlay can show what changed
+    before the user confirms.
     """
 
     file: str
     changed_lines: int  # approximate — lines added + removed
+    diff_preview: str | None = None  # unified diff for in-overlay preview
 
 
 def to_json(obj: Any) -> str:

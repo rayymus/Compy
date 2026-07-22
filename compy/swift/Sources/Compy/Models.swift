@@ -69,6 +69,7 @@ struct QueryResult: Codable {
     let refactorToken: String?  // pointer to staged edits for /confirm
     let nextQuestions: [String]?  // Working Set: "X is called in N places — see them?"
     let personalizationActive: Bool  // Working Set: ranking was biased by recent context
+    let explanation: String?  // prose synthesis for explain/overview (Session 42)
 
     enum CodingKeys: String, CodingKey {
         case intent, hits, degraded, reason, suggestions
@@ -76,6 +77,7 @@ struct QueryResult: Codable {
         case refactorToken = "refactor_token"
         case nextQuestions = "next_questions"
         case personalizationActive = "personalization_active"
+        case explanation
     }
 }
 
@@ -84,10 +86,12 @@ struct FileProposal: Codable, Identifiable {
     var id: String { file }
     let file: String
     let changedLines: Int
+    let diffPreview: String?  // unified diff for in-overlay preview (Session 42)
 
     enum CodingKeys: String, CodingKey {
         case file
         case changedLines = "changed_lines"
+        case diffPreview = "diff_preview"
     }
 }
 

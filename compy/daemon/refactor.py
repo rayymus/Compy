@@ -14,6 +14,7 @@ with "/confirm <token>" to apply, or discards the staged file on reject.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -312,9 +313,21 @@ def stage_format(selection: Selection, workspace: str) -> QueryResult | None:
     new_lines = formatted.count("\n")
     changed = abs(new_lines - orig_lines)
 
+    # Compute unified diff for in-overlay preview.
+    diff = "\n".join(difflib.unified_diff(
+        original.splitlines(), formatted.splitlines(),
+        fromfile=f"a/{sel_file}", tofile=f"b/{sel_file}",
+        lineterm="",
+    ))
+    # Cap diff at ~100 lines to bound JSON size.
+    diff_lines = diff.split("\n")
+    if len(diff_lines) > 100:
+        diff = "\n".join(diff_lines[:100]) + "\n... (truncated)"
+    diff_preview = diff if diff else None
+
     return QueryResult(
         intent="format",
-        refactor_proposals=(FileProposal(file=sel_file, changed_lines=changed),),
+        refactor_proposals=(FileProposal(file=sel_file, changed_lines=changed, diff_preview=diff_preview),),
         refactor_token=token,
     )
 
@@ -495,9 +508,23 @@ def _stage_single_file_edit(
     stage_path.write_text(json.dumps(asdict(staged)), encoding="utf-8")
 
     changed = abs(original.count("\n") - formatted.count("\n")) + 1
+
+    # Compute unified diff for in-overlay preview.
+    file_display = file_path.rsplit("/", 1)[-1]
+    diff = "\n".join(difflib.unified_diff(
+        original.splitlines(), formatted.splitlines(),
+        fromfile=f"a/{file_display}", tofile=f"b/{file_display}",
+        lineterm="",
+    ))
+    # Cap diff at ~100 lines to bound JSON size.
+    diff_lines = diff.split("\n")
+    if len(diff_lines) > 100:
+        diff = "\n".join(diff_lines[:100]) + "\n... (truncated)"
+    diff_preview = diff if diff else None
+
     return QueryResult(
         intent=intent,
-        refactor_proposals=(FileProposal(file=file_path, changed_lines=changed),),
+        refactor_proposals=(FileProposal(file=file_path, changed_lines=changed, diff_preview=diff_preview),),
         refactor_token=token,
         reason=f"Staged {intent}. Enter to confirm, Esc to reject.",
     )

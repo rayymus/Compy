@@ -431,6 +431,8 @@ final class OverlayState: ObservableObject {
     @Published var noMatchSuggestions: [String]? = nil
     @Published var nextQuestions: [String]? = nil  // Working Set: "X is called in N places — see them?"
     @Published var personalizationActive: Bool = false  // Working Set: ranking biased by recent context
+    /// Prose explanation from daemon for explain/overview intents — rendered as chat-style answer.
+    @Published var explanationText: String? = nil
     /// Brief toast message shown in the input bar after commands like /workspace.
     @Published var toastMessage: String? = nil
     /// Staged refactor token — non-nil while showing a refactor proposal.
@@ -441,6 +443,15 @@ final class OverlayState: ObservableObject {
     /// The last-submitted query — captured so the session-export HTML can show
     /// what was actually searched for (state.text is cleared after submit).
     var lastQuestion: String = ""
+
+    // MARK: - Query History (Session 42)
+    /// Command history like a terminal — up arrow cycles through past queries.
+    /// Persists across overlay open/close cycles, cleared only on daemon restart.
+    @Published var queryHistory: [String] = []
+    /// Current index into queryHistory (-1 = not navigating, at bottom = new input).
+    var historyIndex: Int = -1
+    /// The text the user was typing before pressing up arrow — restored on down-arrow past end.
+    var unsavedDraft: String = ""
     /// True when the companion extension is writing fresh envelopes.
     /// Set by HotkeyManager when it reads a fresh envelope file.
     var extensionConnected: Bool = false
@@ -955,6 +966,7 @@ final class OverlayState: ObservableObject {
         resultHeaderText = ""
         nextQuestions = nil
         personalizationActive = false
+        explanationText = nil
         baseFace = ">-<"
         isBlinking = false
         isWinking = false
@@ -1202,6 +1214,16 @@ struct OverlayView: View {
                     .font(.system(size: 18))
                     .focused($isFocused)
                     .onSubmit { submitQuery() }
+                    .onKeyPress(.upArrow) {
+                        if state.queryHistory.isEmpty { return .ignored }
+                        navigateHistory(direction: -1)
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        if state.queryHistory.isEmpty { return .ignored }
+                        navigateHistory(direction: 1)
+                        return .handled
+                    }
                     .onChange(of: isFocused) { _, focused in
                         if focused { state.mode = .text }
                     }
@@ -1707,7 +1729,12 @@ struct OverlayView: View {
             resultHeader
 
             ScrollView {
-                LazyVStack(spacing: 4) {                        ForEach(Array(state.results.enumerated()), id: \.element.id) { index, hit in
+                LazyVStack(spacing: 4) {
+                        // Prose explanation for explain/overview — chat-style answer above code hits.
+                        if let explanation = state.explanationText, !explanation.isEmpty {
+                            explanationBlock(explanation)
+                        }
+                        ForEach(Array(state.results.enumerated()), id: \.element.id) { index, hit in
                         ResultRow(hit: hit, index: index, workspaceRoot: state.workspaceRoot ?? "")
                     }
                 }
@@ -2082,6 +2109,20 @@ struct OverlayView: View {
         """
     }
 
+    /// Prose explanation for explain/overview intents — rendered as a chat-style
+    /// answer block above the code hit list.
+    private func explanationBlock(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13))
+            .foregroundColor(.primary)
+            .lineSpacing(4)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+            .padding(.bottom, 4)
+    }
+
     /// 80% standard count, 20% personality phrasing.
     private var resultHeaderCopy: String {
         if !state.resultHeaderText.isEmpty {
@@ -2123,7 +2164,8 @@ struct OverlayView: View {
 
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(state.refactorProposals) { proposal in
+                ForEach(state.refactorProposals) { proposal in
+                    VStack(spacing: 0) {
                         HStack {
                             Image(systemName: "doc.text")
                                 .font(.system(size: 12))
@@ -2137,9 +2179,22 @@ struct OverlayView: View {
                                 .font(.system(size: 11))
                                 .foregroundColor(Color(NSColor.tertiaryLabelColor))
                         }
-                        .padding(8)
-                        .background(Color(NSColor.textBackgroundColor))
-                        .cornerRadius(6)
+
+                        // Diff preview — unified diff in a monospaced scrollable block.
+                        if let diff = proposal.diffPreview, !diff.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                Text(diff)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .padding(8)
+                            }
+                            .frame(maxHeight: 140)
+                            .background(Color(NSColor.controlBackgroundColor))
+                        }
+                    }
+                    .padding(8)
+                    .background(Color(NSColor.textBackgroundColor))
+                    .cornerRadius(6)
                     }
                 }
                 .padding(12)
@@ -2183,6 +2238,39 @@ struct OverlayView: View {
         guard let token = state.refactorToken else { return }
         state.text = "/confirm \(token)"
         submitQuery()
+    }
+
+    /// Navigate through query history with up/down arrow keys — terminal-style.
+    /// direction: -1 = older (up), 1 = newer (down).
+    private func navigateHistory(direction: Int) {
+        guard !state.queryHistory.isEmpty else { return }
+
+        if state.historyIndex == -1 {
+            // First up-arrow press: save current draft, jump to most recent.
+            state.unsavedDraft = state.text
+            if direction == -1 {
+                state.historyIndex = state.queryHistory.count - 1
+            } else {
+                return  // down-arrow at bottom with no history navigation = no-op
+            }
+        } else {
+            let newIndex = state.historyIndex + direction
+            if newIndex < 0 {
+                // Past the oldest entry — stay at oldest.
+                state.historyIndex = 0
+                state.text = state.queryHistory[0]
+                return
+            }
+            if newIndex >= state.queryHistory.count {
+                // Past the newest — restore draft (or clear).
+                state.historyIndex = -1
+                state.text = state.unsavedDraft
+                state.unsavedDraft = ""
+                return
+            }
+            state.historyIndex = newIndex
+        }
+        state.text = state.queryHistory[state.historyIndex]
     }
 
     private func rejectRefactor() {
@@ -2288,6 +2376,18 @@ struct OverlayView: View {
     private func submitQuery() {
         guard !state.text.isEmpty else { return }
         guard state.phase != .processing, state.phase != .refactorProposal else { return }
+
+        // Save to query history — skip commands and consecutive duplicates.
+        let trimmed = state.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.hasPrefix("/") && trimmed != state.queryHistory.last {
+            state.queryHistory.append(trimmed)
+            // Cap history at 100 entries to bound memory.
+            if state.queryHistory.count > 100 {
+                state.queryHistory.removeFirst(state.queryHistory.count - 100)
+            }
+        }
+        state.historyIndex = -1
+        state.unsavedDraft = ""
 
         // ── Built-in commands ───────────────────────────────────
         // /workspace <path> — switch the search directory.
@@ -2556,6 +2656,7 @@ struct OverlayView: View {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             state.results = result.hits
                             state.nextQuestions = result.nextQuestions
+                            state.explanationText = result.explanation
                             state.personalizationActive = result.personalizationActive
                             state.reasonText = result.reason
                             if result.hits.isEmpty {
