@@ -226,12 +226,27 @@ def _evaluate(
             result = undo_last()
             return parsed, result.hits, result.degraded, result.reason
         # Otherwise: stage a format proposal for the selected file.
-        if selection:
-            result = stage_format(selection, workspace)
-            if result is not None:
-                return parsed, result.hits, result.degraded, result.reason
-        # No file to format — fall through to fuzzy with a hint.
-        return parsed, (), True, "No file selected to format — select a file in the editor first."
+        if not selection or not selection.file:
+            return parsed, (), True, "No file selected to format — select a file in the editor first."
+        result = stage_format(selection, workspace)
+        if result is not None:
+            return parsed, result.hits, result.degraded, result.reason
+        # stage_format returned None — figure out why for a useful message.
+        from pathlib import Path as _Path
+        file_path = _Path(workspace).resolve() / selection.file
+        if not file_path.exists():
+            return parsed, (), True, f"File not found: {selection.file}"
+        from .refactor import _detect_formatter, _is_formatter_available
+        cmd = _detect_formatter(str(file_path))
+        if cmd is None:
+            ext = file_path.suffix
+            return parsed, (), True, f"No formatter for .{ext.lstrip('.')} files. Supported: .py (black), .js/.ts/.json/.md (prettier)."
+        if not _is_formatter_available(cmd):
+            tool = cmd[0]
+            return parsed, (), True, f"Formatter '{tool}' is not installed. Install with: pip install {tool}"
+        # File exists, formatter detected and available, but stage_format returned None.
+        # This means the formatted output was identical to the original (nothing changed).
+        return parsed, (), True, "No formatting changes needed — file is already formatted."
 
     # --- Trace path: stack traces get zero-LLM structural search ---
     if parsed.intent == "trace":

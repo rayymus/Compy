@@ -3,7 +3,7 @@
 > A global-hotkey code-search overlay for macOS. Press **⌘⇧Space**, ask about your codebase in voice or text, and jump directly to the answer. Zero cost. Fully offline-capable.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-200%20pass%2C%201%20skip-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-215%20pass%2C%201%20skip-brightgreen" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
   <img src="https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-lightgrey" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6.0-orange" alt="Swift">
@@ -278,7 +278,7 @@ Paste any Python/Node.js/Go/Rust stack trace → Compy extracts file:line frames
 - [x] **NDJSON framing** — robust stdout protocol instead of fragile `lines.last` (S38)
 - [x] **P5: ML parser** — LLM-based intent classification via Ollama, opt-in with `--parser ollama` (S39)
 - [x] **Embedding-based search** — semantic cosine similarity via `nomic-embed-text`, new reasoner tier (S39)
-- [ ] **Live STT streaming** — real-time transcription instead of push-to-talk bursts
+- [x] **Live STT streaming** — 2s bursts with 30/50ms backoff for real-time feel (S40)
 - [ ] **Cross-platform** — Linux and Windows support
 
 ---

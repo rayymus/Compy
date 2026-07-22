@@ -177,6 +177,67 @@ def _extract_symbol(text: str) -> str | None:
     return max(tokens, key=len)
 
 
+# Query-intent words that should NOT be treated as the symbol when
+# extracting from question text (e.g. "who calls handle_request" →
+# symbol = "handle_request", not "calls" or "who").
+_QUERY_INTENT_WORDS: frozenset[str] = frozenset({
+    "who", "what", "where", "how", "why", "when", "which",
+    "calls", "call", "callers", "caller", "invokes", "invoke",
+    "imports", "import", "inherits", "inherit", "subclasses", "subclass",
+    "uses", "use", "used", "references", "reference",
+    "depends", "breaks", "impact",
+    "does", "do", "did", "is", "are", "was", "were",
+    "the", "this", "that", "these", "those", "a", "an",
+    "of", "in", "on", "at", "to", "from", "by", "for",
+    "and", "or", "not", "but", "if",
+    "explain", "find", "show", "tell", "give", "list", "look",
+    "get", "check", "describe", "see",
+    "all", "other", "else", "also", "any", "some",
+    "me", "us", "you", "it",
+    "places", "place", "times", "time",
+    "connected", "related", "path", "between", "from",
+    "defined", "definition", "def", "class", "function", "func",
+    "dead", "code", "unused", "unreferenced",
+    "format", "rename", "extract", "variable", "type", "hints",
+    "overview", "structure", "architecture", "modules", "components",
+})
+
+
+def _extract_symbol_from_question(question: str) -> str | None:
+    """Extract a code symbol (identifier) from a natural-language question.
+
+    Used for relational/blast_radius/explain queries when no selection is
+    provided.  Scans the question for identifier-shaped tokens (snake_case,
+    camelCase) and picks the most likely symbol by:
+      1. Preferring snake_case names with underscores (Python-style).
+      2. Preferring CamelCase names (JS/TS/Go-style).
+      3. Filtering out query-intent words (who, what, calls, etc.).
+
+    "who calls handle_request" → "handle_request"
+    "what does authenticate call" → "authenticate"
+    "what breaks if I change validate_token" → "validate_token"
+    "explain handle_request" → "handle_request"
+    "who calls it" → None (no real symbol)
+    """  # noqa: D205
+    tokens = _SYMBOL_RE.findall(question)
+    if not tokens:
+        return None
+    # Filter out query-intent words.
+    candidates = [t for t in tokens if t.lower() not in _QUERY_INTENT_WORDS]
+    if not candidates:
+        return None
+    # Prefer snake_case (Python-style) — highest signal.
+    snake = [t for t in candidates if "_" in t and t.islower()]
+    if snake:
+        return max(snake, key=len)
+    # Prefer CamelCase (contains uppercase after lowercase).
+    camel = [t for t in candidates if t != t.lower() and t != t.upper()]
+    if camel:
+        return max(camel, key=len)
+    # Fallback: longest remaining token.
+    return max(candidates, key=len)
+
+
 def _split_camel_case(word: str) -> list[str]:
     """Split a CamelCase/PascalCase word into its constituent parts."""
     parts = _CAMEL_SPLIT_RE.split(word)
@@ -365,6 +426,16 @@ class RuleBasedParser:
             else:
                 intent = "fuzzy"
                 confidence = 0.40
+        # Relational/explain/blast_radius: extract symbol from question text
+        # when no selection is provided. "who calls handle_request" → symbol=
+        # "handle_request". Without this, graph queries fail because the
+        # orchestrator has no symbol to look up.
+        if intent in ("relational", "blast_radius", "explain") and not symbol:
+            q_sym = _extract_symbol_from_question(question)
+            if q_sym:
+                symbol = q_sym
+                confidence = max(confidence, 0.75)
+
         keywords = _pre_keywords
         # Gap 2 (Session 20): Inject the selection symbol into fuzzy keywords.
         # The user selected a piece of code — the symbol from that code should

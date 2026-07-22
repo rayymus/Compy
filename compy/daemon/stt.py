@@ -24,6 +24,7 @@ from pathlib import Path
 DEFAULT_MODEL_SMALL = os.path.expanduser("~/Library/Caches/whisper-cpp/ggml-small.en.bin")
 DEFAULT_MODEL_TINY = os.path.expanduser("~/Library/Caches/whisper-cpp/ggml-tiny.en.bin")
 DEFAULT_DURATION = 4  # seconds (burst recording window)
+STREAM_DURATION = 2   # seconds (live streaming mode — shorter for real-time feel)
 
 # Programming jargon prompt — biases whisper toward technical terms.
 # Passed as --prompt to whisper-cli (acts as preceding context, heavily
@@ -127,13 +128,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Compy STT: record mic → transcribe via whisper.cpp")
     parser.add_argument("--duration", type=int, default=DEFAULT_DURATION,
                         help=f"Recording duration in seconds (default: {DEFAULT_DURATION})")
+    parser.add_argument("--stream", action="store_true", default=False,
+                        help="Live streaming mode: 2s bursts for real-time transcription feel")
     parser.add_argument("--model", type=str, default=None,
                         help="Path to whisper.cpp GGML model (default: auto-select small.en or tiny.en)")
     parser.add_argument("--prompt", type=str, default=_PROGRAMMING_PROMPT,
                         help="Initial prompt text to bias transcription (programming jargon)")
     args = parser.parse_args()
 
-    result = record_and_transcribe(duration=args.duration, model_path=args.model, prompt=args.prompt)
+    duration = STREAM_DURATION if args.stream else args.duration
+    result = record_and_transcribe(duration=duration, model_path=args.model, prompt=args.prompt)
     print(json.dumps(result))
     return 0 if result["success"] else 1
 

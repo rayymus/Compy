@@ -99,7 +99,17 @@ def main(argv: list[str] | None = None) -> int:
         grapher = GraphQuerier()
         grapher.load(ws, force_rebuild=args.graph_rebuild, fast_only=not args.graph_rebuild)
     except Exception:
-        grapher = None  # Graph not available — overview/explain/rename fall through.
+        # Cache miss on fast_only — try a full build so overview/explain/
+        # relational queries work even on first run or after workspace switch.
+        # This takes ~2-5s but only happens once per workspace (graph is cached).
+        if not args.graph_rebuild:
+            try:
+                grapher = GraphQuerier()
+                grapher.load(ws, force_rebuild=True)
+            except Exception:
+                grapher = None
+        else:
+            grapher = None
 
     historian = GitHistory()
 

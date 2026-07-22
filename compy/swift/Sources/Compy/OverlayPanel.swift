@@ -1423,9 +1423,9 @@ struct OverlayView: View {
         return fallbackRoot
     }
 
-    /// Spawn whisper.cpp recording: burst-capture 3s of mic audio,
-    /// transcribe, set text. Push-to-talk model — click to record, click to stop.
-    /// Continuous: restarts after each burst with 150ms backoff for responsive feel.
+    /// Spawn whisper.cpp recording: live streaming with 2s bursts.
+    /// Click to record, click to stop. Continuous: restarts after each burst
+    /// with 50ms backoff for real-time transcription feel.
     private func startRecording() {
         state.recognizedTextPrefix = state.text
         state.isRecording = true
@@ -1444,7 +1444,7 @@ struct OverlayView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["python3", "-m", "compy.daemon.stt", "--duration", "4"]
+            proc.arguments = ["python3", "-m", "compy.daemon.stt", "--stream"]
             proc.currentDirectoryURL = repoRoot
 
             let stdoutPipe = Pipe()
@@ -1493,11 +1493,11 @@ struct OverlayView: View {
                     }
 
                     // Restart for continuous listening.
-                    // Fast restart (50ms) if previous burst was empty (user may not
-                    // have started speaking yet). Normal 150ms backoff otherwise.
+                    // 50ms always in streaming mode — 2s bursts are short enough
+                    // that we don't need longer backoff. Gives real-time feel.
                     let wasEmpty = state.text.isEmpty || state.text == state.recognizedTextPrefix
                     if state.isRecording {
-                        let backoff = wasEmpty ? 50 : 150
+                        let backoff = wasEmpty ? 30 : 50
                         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(backoff)) {
                             guard state.isRecording else { return }
                             state.sttPhase = "Recording…"

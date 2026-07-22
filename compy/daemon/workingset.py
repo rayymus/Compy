@@ -434,23 +434,32 @@ class WorkingSet:
             node_id = self._resolve_node_cached(file, line, graph)
             if not node_id:
                 continue
-            name = node_id.rsplit("::", 1)[-1] if "::" in node_id else node_id
+            # Skip pseudo-nodes (<module>, <unknown>, <import>) — they're not
+            # real symbols and generate questions like "Who calls <module>?"
+            # which always return no results.
+            short = node_id.rsplit("::", 1)[-1] if "::" in node_id else node_id
+            if short.startswith("<") and short.endswith(">"):
+                continue
+            # Skip nodes that aren't functions or classes.
+            node_kind = graph.nodes[node_id].get("kind", "")
+            if node_kind not in ("function", "class"):
+                continue
             callers = list(graph.predecessors(node_id))
             callees = list(graph.successors(node_id))
 
             if len(callers) > 5:
                 questions.append(
-                    f"{name} is called in {len(callers)} places — see them?"
+                    f"{short} is called in {len(callers)} places — see them?"
                 )
             elif len(callers) > 0:
-                questions.append(f"Who calls {name}?")
+                questions.append(f"Who calls {short}?")
             elif len(callers) == 0:
-                questions.append(f"Is {name} still used?")
+                questions.append(f"Is {short} still used?")
 
             if len(questions) >= MAX_NEXT_QUESTIONS:
                 break
             if len(callees) > 3:
-                questions.append(f"What does {name} call?")
+                questions.append(f"What does {short} call?")
 
         return questions[:MAX_NEXT_QUESTIONS]
 
