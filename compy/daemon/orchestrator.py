@@ -105,7 +105,7 @@ def run(
     # Record this query's keywords for future topic-shift detection.
     ws.record_keywords(parsed.keywords)
 
-    parsed, hits, degraded, reason = _evaluate(
+    parsed, hits, degraded, reason, explanation = _evaluate(
         parsed=parsed,
         parser=parser,
         grepper=grepper,
@@ -149,6 +149,7 @@ def run(
         suggestions=suggestions,
         next_questions=tuple(next_questions) if next_questions else None,
         personalization_active=personalization_active,
+        explanation=explanation,
     )
 
 
@@ -165,7 +166,7 @@ def _evaluate(
     historian: Historian | None = None,
     on_candidates: Callable[[tuple[GrepHit, ...]], None] | None = None,
     session_context: tuple[str, ...] | None = None,
-) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None]:
+) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None, str | None]:
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
@@ -178,7 +179,7 @@ def _evaluate(
         if not selection or not selection.file:
             return parsed, (), True, (
                 f"{parsed.intent} requires an active file selection."
-            )
+            ), None
         func = (
             stage_extract_variable
             if parsed.intent == "extract_variable"
@@ -186,11 +187,11 @@ def _evaluate(
         )
         result = func(selection, workspace)
         if result is not None:
-            return parsed, result.hits, result.degraded, result.reason
+            return parsed, result.hits, result.degraded, result.reason, None
         return parsed, (), True, (
             f"Could not {parsed.intent} — syntax not supported "
             f"or tree-sitter unavailable."
-        )
+        ), None
 
     # --- Rename path: graph-verified identifier rename ---
     if parsed.intent == "rename" and grapher is not None:
@@ -205,9 +206,9 @@ def _evaluate(
             else:
                 result = stage_rename(old_name, new_name, workspace, grapher)
                 if result is not None:
-                    return parsed, result.hits, result.degraded, result.reason
+                    return parsed, result.hits, result.degraded, result.reason, None
         # No graph or no symbol — fall through with a hint.
-        return parsed, (), True, "Rename requires a valid symbol and an active code graph."
+        return parsed, (), True, "Rename requires a valid symbol and an active code graph.", None
 
     # --- Format / refactor path: formatters + staged apply ---
     if parsed.intent == "format":
@@ -217,36 +218,36 @@ def _evaluate(
         if q.startswith("/confirm"):
             parts = q.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
-                return parsed, (), True, "Missing token — use /confirm <token>"
+                return parsed, (), True, "Missing token — use /confirm <token>", None
             token = parts[1].strip()
             result = apply_staged(token, workspace)
-            return parsed, result.hits, result.degraded, result.reason
+            return parsed, result.hits, result.degraded, result.reason, None
         # /undo — restore from the last undo snapshot.
         if q == "/undo":
             result = undo_last()
-            return parsed, result.hits, result.degraded, result.reason
+            return parsed, result.hits, result.degraded, result.reason, None
         # Otherwise: stage a format proposal for the selected file.
         if not selection or not selection.file:
-            return parsed, (), True, "No file selected to format — select a file in the editor first."
+            return parsed, (), True, "No file selected to format — select a file in the editor first.", None
         result = stage_format(selection, workspace)
         if result is not None:
-            return parsed, result.hits, result.degraded, result.reason
+            return parsed, result.hits, result.degraded, result.reason, None
         # stage_format returned None — figure out why for a useful message.
         from pathlib import Path as _Path
         file_path = _Path(workspace).resolve() / selection.file
         if not file_path.exists():
-            return parsed, (), True, f"File not found: {selection.file}"
+            return parsed, (), True, f"File not found: {selection.file}", None
         from .refactor import _detect_formatter, _is_formatter_available
         cmd = _detect_formatter(str(file_path))
         if cmd is None:
             ext = file_path.suffix
-            return parsed, (), True, f"No formatter for .{ext.lstrip('.')} files. Supported: .py (black), .js/.ts/.json/.md (prettier)."
+            return parsed, (), True, f"No formatter for .{ext.lstrip('.')} files. Supported: .py (black), .js/.ts/.json/.md (prettier).", None
         if not _is_formatter_available(cmd):
             tool = cmd[0]
-            return parsed, (), True, f"Formatter '{tool}' is not installed. Install with: pip install {tool}"
+            return parsed, (), True, f"Formatter '{tool}' is not installed. Install with: pip install {tool}", None
         # File exists, formatter detected and available, but stage_format returned None.
         # This means the formatted output was identical to the original (nothing changed).
-        return parsed, (), True, "No formatting changes needed — file is already formatted."
+        return parsed, (), True, "No formatting changes needed — file is already formatted.", None
 
     # --- Trace path: stack traces get zero-LLM structural search ---
     if parsed.intent == "trace":
@@ -267,7 +268,7 @@ def _evaluate(
                         score=1.0, source="trace",
                     ))
                 if trace_hits:
-                    return parsed, tuple(trace_hits), False, None
+                    return parsed, tuple(trace_hits), False, None, None
         # No frames extracted — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -349,8 +350,7 @@ def _evaluate(
                                   structural_context=f"{src} → {tgt}")
                         for h in candidates
                     )
-                    return parsed, hits, False, None
-        parsed = replace(parsed, intent="fuzzy")
+                    return parsed, hits, False, None, None
 
     # --- Explain path: "what does this function do?" with selection context ---
     if parsed.intent == "explain":
@@ -362,10 +362,10 @@ def _evaluate(
             else:
                 symbol = parsed.symbol or _first_keyword(parsed.keywords)
                 if symbol:
-                    # Show the function's own definition + callers + callees.
-                    hits = _build_explain_result(symbol, grapher, sel_file or "", workspace)
+                    # Synthesize prose explanation + structural evidence.
+                    hits, explanation = _build_explain_result(symbol, grapher, sel_file or "", workspace)
                     if hits:
-                        return parsed, hits, False, None
+                        return parsed, hits, False, None, explanation
         # No graph or no symbol — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -392,7 +392,7 @@ def _evaluate(
                         )
                         for h in candidates
                     )
-                    return parsed, hits, False, None
+                    return parsed, hits, False, None, None
             # Graph unavailable or returned empty — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -436,13 +436,13 @@ def _evaluate(
             try:
                 hits = grepper.grep(parsed.symbol, workspace)
             except ReasonerUnavailable as exc:
-                return parsed, (), True, f"grep failed: {exc}"
+                return parsed, (), True, f"grep failed: {exc}", None
 
         if not hits:
             # §2a fallback: zero grep hits → fuzzy branch with keywords if any.
             parsed = replace(parsed, intent="fuzzy")
         elif len(hits) <= DIRECT_HIT_MAX:
-            return parsed, _promote_grep(hits, direct=True), False, None
+            return parsed, _promote_grep(hits, direct=True), False, None, None
         else:
             return _rank_or_degrade(
                 parsed=parsed, reasoners=reasoners,
@@ -491,7 +491,7 @@ def _evaluate(
                     else:
                         candidates = tuple(merged)
         if not candidates:
-            return parsed, (), False, "no hits"
+            return parsed, (), False, "no hits", None
 
         return _rank_or_degrade(
             parsed=parsed, reasoners=reasoners,
@@ -501,7 +501,7 @@ def _evaluate(
             grapher=grapher, historian=historian,
             workspace=workspace, session_context=session_context,
         )
-    return parsed, (), False, "no actionable intent"
+    return parsed, (), False, "no actionable intent", None
 
 
 def _rank_or_degrade(
@@ -517,7 +517,7 @@ def _rank_or_degrade(
     historian: Historian | None = None,
     workspace: str = ".",
     session_context: tuple[str, ...] | None = None,
-) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None]:
+) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None, str | None]:
     """Try the reasoner chain. Every failure falls through, all-failure degrades to grep hint."""
     # Stream intermediate candidates to the overlay BEFORE blocking on reasoner.
     if on_candidates and candidates:
@@ -550,11 +550,11 @@ def _rank_or_degrade(
             last_err = f"{r.name}: {exc}"
             continue
         if ranked:
-            return parsed, ranked, False, None
+            return parsed, ranked, False, None, None
         # Returned empty — fall through to the next reasoner per spec §3a.
         last_err = f"{r.name}: returned empty"
     # Spec §3a: never hard-error; grep-only hits with a note.
-    return parsed, _promote_grep(candidates, direct=False), True, f"all reasoners unavailable; {last_err or 'no reasoners configured'}"
+    return parsed, _promote_grep(candidates, direct=False), True, f"all reasoners unavailable; {last_err or 'no reasoners configured'}", None
 
 
 def _enrich_candidates_for_ranking(
@@ -643,15 +643,16 @@ def _enrich_candidates_for_ranking(
 
 def _build_explain_result(
     symbol: str, grapher: Grapher, selection_file: str, workspace: str
-) -> tuple[RankedHit, ...]:
-    """Build a micro-explanation: definition + callers + callees for a symbol.
+) -> tuple[tuple[RankedHit, ...], str]:
+    """Build a micro-explanation: prose summary + definition + callers + callees.
 
-    Returns RankedHits that show what the function is, who calls it, and what it
-    calls — a compact structural summary without needing an LLM.
+    Returns (hits, explanation) — the hits are the structural evidence
+    (definition, callers, callees), and the explanation is a conversational
+    prose summary synthesized from graph data. No LLM required.
     """
     graph = grapher._graph  # type: ignore[attr-defined]
     if graph is None:
-        return ()
+        return (), None
 
     # Find the definition node in the graph.
     node_id: str | None = None
@@ -667,6 +668,7 @@ def _build_explain_result(
                 break
 
     hits: list[RankedHit] = []
+    explanation_parts: list[str] = []
 
     if node_id:
         node_data = graph.nodes[node_id]
@@ -682,32 +684,57 @@ def _build_explain_result(
             score=1.0, source="graph",
             structural_context="Definition",
         ))
+        # Synthesize the definition sentence.
+        article = "an" if kind[0] in "aeiou" else "a"
+        explanation_parts.append(
+            f"**{symbol}** is {article} {kind} defined in `{file}:{line}`."
+        )
+    else:
+        explanation_parts.append(
+            f"**{symbol}** appears in the codebase but isn't indexed as a "
+            f"function or class in the graph."
+        )
 
     # Callers — who calls this symbol.
     try:
         callers = grapher.query(symbol, intent="callers")
-        for c in callers[:3]:
-            hits.append(RankedHit(
-                file=c.file, line=c.line, snippet=c.snippet,
-                score=0.85, source="graph",
-                structural_context="Called by",
-            ))
+        if callers:
+            names = _caller_names(callers, max_items=5)
+            count = len(callers)
+            if count > 5:
+                explanation_parts.append(
+                    f"It's called by {count} places, including {names}."
+                )
+            elif count == 1:
+                explanation_parts.append(f"It's called by {names}.")
+            else:
+                explanation_parts.append(f"It's called by {names}.")
+            for c in callers[:3]:
+                hits.append(RankedHit(
+                    file=c.file, line=c.line, snippet=c.snippet,
+                    score=0.85, source="graph",
+                    structural_context="Called by",
+                ))
     except Exception:
         pass
 
     # Callees — what this symbol calls.
     try:
         callees = grapher.query(symbol, intent="calls")
-        for c in callees[:3]:
-            hits.append(RankedHit(
-                file=c.file, line=c.line, snippet=c.snippet,
-                score=0.8, source="graph",
-                structural_context="Calls",
-            ))
+        if callees:
+            names = _caller_names(callees, max_items=5)
+            explanation_parts.append(f"It calls {names}.")
+            for c in callees[:3]:
+                hits.append(RankedHit(
+                    file=c.file, line=c.line, snippet=c.snippet,
+                    score=0.8, source="graph",
+                    structural_context="Calls",
+                ))
     except Exception:
         pass
 
-    return tuple(hits)
+    explanation = " ".join(explanation_parts)
+    return tuple(hits), explanation
 
 
 def _filter_overview_by_keywords(
