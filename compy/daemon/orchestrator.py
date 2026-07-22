@@ -13,6 +13,7 @@ from dataclasses import replace
 
 from .interfaces import Grapher, Grepper, Historian, Parser, Reasoner, ReasonerUnavailable
 from .models import (
+    FileProposal,
     GrepHit,
     ParsedQuery,
     QueryRequest,
@@ -65,6 +66,38 @@ MAX_FUZZY_KEYWORD_TRIES = 5
 LSP_ENRICH_MAX = 8
 
 
+class _EvalResult:
+    """Carrier for _evaluate / _rank_or_degrade return values.
+
+    Uses a dataclass-ish class instead of a fragile 7-tuple so refactor
+    data doesn't get silently dropped during unpacking (Session 42 bug: the
+    5-tuple dropped refactor_proposals and refactor_token on the floor).
+    """
+
+    __slots__ = (
+        "parsed", "hits", "degraded", "reason", "explanation",
+        "refactor_proposals", "refactor_token",
+    )
+
+    def __init__(
+        self,
+        parsed: ParsedQuery,
+        hits: tuple[RankedHit, ...],
+        degraded: bool,
+        reason: str | None = None,
+        explanation: str | None = None,
+        refactor_proposals: tuple[FileProposal, ...] | None = None,
+        refactor_token: str | None = None,
+    ) -> None:
+        self.parsed = parsed
+        self.hits = hits
+        self.degraded = degraded
+        self.reason = reason
+        self.explanation = explanation
+        self.refactor_proposals = refactor_proposals
+        self.refactor_token = refactor_token
+
+
 def run(
     request: QueryRequest,
     *,
@@ -105,7 +138,7 @@ def run(
     # Record this query's keywords for future topic-shift detection.
     ws.record_keywords(parsed.keywords)
 
-    parsed, hits, degraded, reason, explanation = _evaluate(
+    er = _evaluate(
         parsed=parsed,
         parser=parser,
         grepper=grepper,
@@ -118,6 +151,10 @@ def run(
         on_candidates=on_candidates,
         session_context=request.session_context,
     )
+    parsed, hits, degraded, reason = er.parsed, er.hits, er.degraded, er.reason
+    explanation = er.explanation
+    refactor_proposals = er.refactor_proposals
+    refactor_token = er.refactor_token
     # Annotate results with structural context from Graphify (callers/importers).
     # Since Layer 2 enrichment already computed context per GrepHit, and reasoners
     # propagate it to RankedHit.structural_context, no duplicate Graphify query needed.
@@ -150,6 +187,8 @@ def run(
         next_questions=tuple(next_questions) if next_questions else None,
         personalization_active=personalization_active,
         explanation=explanation,
+        refactor_proposals=refactor_proposals,
+        refactor_token=refactor_token,
     )
 
 
@@ -166,7 +205,7 @@ def _evaluate(
     historian: Historian | None = None,
     on_candidates: Callable[[tuple[GrepHit, ...]], None] | None = None,
     session_context: tuple[str, ...] | None = None,
-) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None, str | None]:
+) -> _EvalResult:
     sel_file = selection.file if selection else None
     sel_text = selection.text if selection else None
 
@@ -177,9 +216,7 @@ def _evaluate(
     if parsed.intent in ("extract_variable", "add_type_hints"):
         from .refactor import stage_extract_variable, stage_add_type_hints
         if not selection or not selection.file:
-            return parsed, (), True, (
-                f"{parsed.intent} requires an active file selection."
-            ), None
+            return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"{parsed.intent} requires an active file selection.")
         func = (
             stage_extract_variable
             if parsed.intent == "extract_variable"
@@ -187,11 +224,8 @@ def _evaluate(
         )
         result = func(selection, workspace)
         if result is not None:
-            return parsed, result.hits, result.degraded, result.reason, None
-        return parsed, (), True, (
-            f"Could not {parsed.intent} — syntax not supported "
-            f"or tree-sitter unavailable."
-        ), None
+            return _EvalResult(parsed=parsed, hits=result.hits, degraded=result.degraded, reason=result.reason, refactor_proposals=result.refactor_proposals, refactor_token=result.refactor_token)
+        return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"Could not {parsed.intent} — syntax not supported or tree-sitter unavailable.")
 
     # --- Rename path: graph-verified identifier rename ---
     if parsed.intent == "rename" and grapher is not None:
@@ -206,9 +240,9 @@ def _evaluate(
             else:
                 result = stage_rename(old_name, new_name, workspace, grapher)
                 if result is not None:
-                    return parsed, result.hits, result.degraded, result.reason, None
+                    return _EvalResult(parsed=parsed, hits=result.hits, degraded=result.degraded, reason=result.reason, refactor_proposals=result.refactor_proposals, refactor_token=result.refactor_token)
         # No graph or no symbol — fall through with a hint.
-        return parsed, (), True, "Rename requires a valid symbol and an active code graph.", None
+        return _EvalResult(parsed=parsed, hits=(), degraded=True, reason="Rename requires a valid symbol and an active code graph.")
 
     # --- Format / refactor path: formatters + staged apply ---
     if parsed.intent == "format":
@@ -218,36 +252,36 @@ def _evaluate(
         if q.startswith("/confirm"):
             parts = q.split(" ", 1)
             if len(parts) < 2 or not parts[1].strip():
-                return parsed, (), True, "Missing token — use /confirm <token>", None
+                return _EvalResult(parsed=parsed, hits=(), degraded=True, reason="Missing token — use /confirm <token>")
             token = parts[1].strip()
             result = apply_staged(token, workspace)
-            return parsed, result.hits, result.degraded, result.reason, None
+            return _EvalResult(parsed=parsed, hits=result.hits, degraded=result.degraded, reason=result.reason, refactor_proposals=result.refactor_proposals, refactor_token=result.refactor_token)
         # /undo — restore from the last undo snapshot.
         if q == "/undo":
             result = undo_last()
-            return parsed, result.hits, result.degraded, result.reason, None
+            return _EvalResult(parsed=parsed, hits=result.hits, degraded=result.degraded, reason=result.reason, refactor_proposals=result.refactor_proposals, refactor_token=result.refactor_token)
         # Otherwise: stage a format proposal for the selected file.
         if not selection or not selection.file:
-            return parsed, (), True, "No file selected to format — select a file in the editor first.", None
+            return _EvalResult(parsed=parsed, hits=(), degraded=True, reason="No file selected to format — select a file in the editor first.")
         result = stage_format(selection, workspace)
         if result is not None:
-            return parsed, result.hits, result.degraded, result.reason, None
+            return _EvalResult(parsed=parsed, hits=result.hits, degraded=result.degraded, reason=result.reason, refactor_proposals=result.refactor_proposals, refactor_token=result.refactor_token)
         # stage_format returned None — figure out why for a useful message.
         from pathlib import Path as _Path
         file_path = _Path(workspace).resolve() / selection.file
         if not file_path.exists():
-            return parsed, (), True, f"File not found: {selection.file}", None
+            return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"File not found: {selection.file}")
         from .refactor import _detect_formatter, _is_formatter_available
         cmd = _detect_formatter(str(file_path))
         if cmd is None:
             ext = file_path.suffix
-            return parsed, (), True, f"No formatter for .{ext.lstrip('.')} files. Supported: .py (black), .js/.ts/.json/.md (prettier).", None
+            return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"No formatter for .{ext.lstrip('.')} files. Supported: .py (black), .js/.ts/.json/.md (prettier).")
         if not _is_formatter_available(cmd):
             tool = cmd[0]
-            return parsed, (), True, f"Formatter '{tool}' is not installed. Install with: pip install {tool}", None
+            return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"Formatter '{tool}' is not installed. Install with: pip install {tool}")
         # File exists, formatter detected and available, but stage_format returned None.
         # This means the formatted output was identical to the original (nothing changed).
-        return parsed, (), True, "No formatting changes needed — file is already formatted.", None
+        return _EvalResult(parsed=parsed, hits=(), degraded=True, reason="No formatting changes needed — file is already formatted.")
 
     # --- Trace path: stack traces get zero-LLM structural search ---
     if parsed.intent == "trace":
@@ -268,7 +302,7 @@ def _evaluate(
                         score=1.0, source="trace",
                     ))
                 if trace_hits:
-                    return parsed, tuple(trace_hits), False, None, None
+                    return _EvalResult(parsed=parsed, hits=tuple(trace_hits), degraded=False, reason=None)
         # No frames extracted — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -350,7 +384,7 @@ def _evaluate(
                                   structural_context=f"{src} → {tgt}")
                         for h in candidates
                     )
-                    return parsed, hits, False, None, None
+                    return _EvalResult(parsed=parsed, hits=hits, degraded=False, reason=None)
 
     # --- Explain path: "what does this function do?" with selection context ---
     if parsed.intent == "explain":
@@ -365,7 +399,7 @@ def _evaluate(
                     # Synthesize prose explanation + structural evidence.
                     hits, explanation = _build_explain_result(symbol, grapher, sel_file or "", workspace)
                     if hits:
-                        return parsed, hits, False, None, explanation
+                        return _EvalResult(parsed=parsed, hits=hits, degraded=False, explanation=explanation)
         # No graph or no symbol — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -392,7 +426,7 @@ def _evaluate(
                         )
                         for h in candidates
                     )
-                    return parsed, hits, False, None, None
+                    return _EvalResult(parsed=parsed, hits=hits, degraded=False, reason=None)
             # Graph unavailable or returned empty — fall through to fuzzy.
         parsed = replace(parsed, intent="fuzzy")
 
@@ -436,13 +470,13 @@ def _evaluate(
             try:
                 hits = grepper.grep(parsed.symbol, workspace)
             except ReasonerUnavailable as exc:
-                return parsed, (), True, f"grep failed: {exc}", None
+                return _EvalResult(parsed=parsed, hits=(), degraded=True, reason=f"grep failed: {exc}")
 
         if not hits:
             # §2a fallback: zero grep hits → fuzzy branch with keywords if any.
             parsed = replace(parsed, intent="fuzzy")
         elif len(hits) <= DIRECT_HIT_MAX:
-            return parsed, _promote_grep(hits, direct=True), False, None, None
+            return _EvalResult(parsed=parsed, hits=_promote_grep(hits, direct=True), degraded=False)
         else:
             return _rank_or_degrade(
                 parsed=parsed, reasoners=reasoners,
@@ -491,7 +525,7 @@ def _evaluate(
                     else:
                         candidates = tuple(merged)
         if not candidates:
-            return parsed, (), False, "no hits", None
+            return _EvalResult(parsed=parsed, hits=(), degraded=False, reason="no hits")
 
         return _rank_or_degrade(
             parsed=parsed, reasoners=reasoners,
@@ -501,7 +535,7 @@ def _evaluate(
             grapher=grapher, historian=historian,
             workspace=workspace, session_context=session_context,
         )
-    return parsed, (), False, "no actionable intent", None
+    return _EvalResult(parsed=parsed, hits=(), degraded=False, reason="no actionable intent")
 
 
 def _rank_or_degrade(
@@ -517,7 +551,7 @@ def _rank_or_degrade(
     historian: Historian | None = None,
     workspace: str = ".",
     session_context: tuple[str, ...] | None = None,
-) -> tuple[ParsedQuery, tuple[RankedHit, ...], bool, str | None, str | None]:
+) -> _EvalResult:
     """Try the reasoner chain. Every failure falls through, all-failure degrades to grep hint."""
     # Stream intermediate candidates to the overlay BEFORE blocking on reasoner.
     if on_candidates and candidates:
@@ -550,11 +584,11 @@ def _rank_or_degrade(
             last_err = f"{r.name}: {exc}"
             continue
         if ranked:
-            return parsed, ranked, False, None, None
+            return _EvalResult(parsed=parsed, hits=ranked, degraded=False)
         # Returned empty — fall through to the next reasoner per spec §3a.
         last_err = f"{r.name}: returned empty"
     # Spec §3a: never hard-error; grep-only hits with a note.
-    return parsed, _promote_grep(candidates, direct=False), True, f"all reasoners unavailable; {last_err or 'no reasoners configured'}", None
+    return _EvalResult(parsed=parsed, hits=_promote_grep(candidates, direct=False), degraded=True, reason=f"all reasoners unavailable; {last_err or 'no reasoners configured'}")
 
 
 def _enrich_candidates_for_ranking(
