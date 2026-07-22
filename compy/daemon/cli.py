@@ -19,8 +19,10 @@ from typing import Any
 from .gitlog import GitHistory
 from .graphify import GraphQuerier
 from .grepper import RipgrepGrepper
+from .embedding_ranker import EmbeddingRanker
 from .heuristic_reasoner import HeuristicReasoner
 from .models import QueryRequest, to_json
+from .ollama_parser import OllamaParser
 from .orchestrator import run as run_pipeline
 from .parser import RuleBasedParser
 from .reasoner import FreebuffReasoner, OllamaReasoner, StubReasoner
@@ -37,10 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--reasoner",
-        choices=("freebuff", "ollama", "heuristic", "stub"),
+        choices=("freebuff", "ollama", "heuristic", "embedding", "stub"),
         default=None,
         help="Pin the reasoner chain to a single backend. Default chain is "
-             "freebuff -> ollama -> heuristic -> stub.",
+             "freebuff -> ollama -> embedding -> heuristic -> stub.",
+    )
+    parser.add_argument(
+        "--parser",
+        choices=("rule", "ollama"),
+        default="rule",
+        help="Parser backend: 'rule' (regex, fast) or 'ollama' (LLM, P5). "
+             "Default: rule. Set COMPY_PARSER=ollama to use LLM by default.",
     )
     parser.add_argument(
         "--rg", default="rg",
@@ -61,6 +70,19 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     reasoners = _build_reasoners(args.reasoner)
+
+    # P5: LLM parser — uses Ollama to classify intent instead of 18 regex rules.
+    # Falls back to RuleBasedParser on any failure (server down, timeout, etc.).
+    import os
+    use_ollama_parser = (
+        args.parser == "ollama"
+        or os.environ.get("COMPY_PARSER") == "ollama"
+    )
+    pipeline_parser = (
+        OllamaParser(fallback=RuleBasedParser())
+        if use_ollama_parser
+        else RuleBasedParser()
+    )
 
     # Build Graphify querier — always initialized so overview/explain/rename/
     # dead_code queries work. Uses fast_only=True by default (loads cached graph
@@ -106,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_pipeline(
         request,
-        parser=RuleBasedParser(),
+        parser=pipeline_parser,
         grepper=RipgrepGrepper(rg_path=args.rg),
         reasoners=reasoners,
         grapher=grapher,
@@ -161,9 +183,14 @@ def _build_reasoners(pinned: str | None) -> tuple:
         "freebuff": (FreebuffReasoner(),),
         "ollama": (OllamaReasoner(),),
         "heuristic": (HeuristicReasoner(),),
+        "embedding": (EmbeddingRanker(),),
         "stub": (StubReasoner(),),
     }
     head = chains[pinned]
-    if pinned == "stub" or pinned == "heuristic":
+    # stub and heuristic never raise — safe bare. embedding CAN raise
+    # ReasonerUnavailable, so it needs a safety tail.
+    if pinned in ("stub", "heuristic"):
         return head
-    return head + (HeuristicReasoner(), StubReasoner())
+    if pinned == "embedding":
+        return head + (StubReasoner(),)
+    return head + (EmbeddingRanker(), HeuristicReasoner(), StubReasoner())
