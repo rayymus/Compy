@@ -138,7 +138,7 @@ def run(
     if hits:
         hits, personalization_active = ws.bias_hits(hits, ws_graph)
         ws.record_query(hits)
-    next_questions = ws.generate_next_questions(ws_graph)
+    next_questions = ws.generate_next_questions(ws_graph, current_symbol=parsed.symbol)
     ws.save()
 
     return QueryResult(
@@ -814,17 +814,35 @@ def _extract_symbol_from_snippet(snippet: str) -> str | None:
     return m.group(1) if m else None
 
 
+# Programming language keywords that must never appear as caller/callee names.
+# When tree-sitter assigns a node name like "def" or "class", it leaks through
+# _extract_symbol_from_snippet and shows up as "Called by: render_tree_image; def".
+# This is the same category of bug as _STOPWORDS in parser.py — the fix there
+# only covered keyword extraction for search, not the badge assembly code path.
+_CALLER_NAME_BLOCKLIST: frozenset[str] = frozenset({
+    "def", "class", "return", "import", "pass", "if", "else", "elif",
+    "for", "while", "try", "except", "raise", "with", "as", "from",
+    "yield", "async", "await", "lambda", "global", "nonlocal", "and",
+    "or", "not", "in", "is", "True", "False", "None", "self", "break",
+    "continue", "function", "func", "fn", "struct", "enum", "trait",
+    "impl", "const", "let", "var", "export", "default", "type",
+})
+
+
 def _caller_names(callers: tuple[GrepHit, ...], *, max_items: int = 2) -> str:
     """Extract short display names from Graphify GrepHits.
 
     Graphify stores node IDs like 'path/to/file.py::function_name'.
     We extract just 'function_name' for display. Falls back to the
     caller's file basename if symbol extraction fails.
+
+    Filters programming language keywords that leak through when
+    tree-sitter assigns poor node names (e.g. "def", "class").
     """
     names: list[str] = []
     for c in callers[:max_items]:
         name = _extract_symbol_from_snippet(c.snippet)
-        if name is None:
+        if name is None or name in _CALLER_NAME_BLOCKLIST:
             # Fall back to file basename — cleaner than raw snippet words.
             name = c.file.rsplit("/", 1)[-1].removesuffix(".py")
         names.append(name)

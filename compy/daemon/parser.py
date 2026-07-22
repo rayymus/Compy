@@ -51,8 +51,10 @@ _INTENT_RULES: tuple[tuple[str, str], ...] = (
     # \b (not ^) allows leading whitespace, punctuation, or natural-language
     # prefixes like "please rename..." — intent must still start with "rename".
     (r"\brename\s+([\w]+)\s+to\s+([\w]+)", "rename"),
-    # Format / refactor: "format this file", "format the code", "/undo", "/confirm".
-    (r"\bformat (this|the) (file|code|selection)\b|^/(?:undo|confirm)\b", "format"),
+    # Format / refactor: "format this file", "format the code", "format X properly",
+    # "/undo", "/confirm".  The \S+ alternative catches "format test.json properly"
+    # and "format database.py" — any filename-shaped token after "format".
+    (r"\bformat (this|the) (file|code|selection)\b|\bformat\s+\S+\b|^/(?:undo|confirm)\b", "format"),
     # Tier 3 inline suggestions — deterministic, tree-sitter/regex based, no LLM.
     (r"\bextract (this )?(expression|variable)\b", "extract_variable"),
     (r"\badd type hints?\b|\btype hint (this |the )?(function|method)\b", "add_type_hints"),

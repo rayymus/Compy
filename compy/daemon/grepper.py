@@ -59,6 +59,12 @@ class RipgrepGrepper:
         "!*.pdf", "!*.ttf", "!*.woff", "!*.woff2", "!*.eot",
         "!*.sum",
         "!__pycache__/*", "!node_modules/*", "!.git/*",
+        # Extensionless known-noise files — these slipped past the
+        # extension-based denylist.  LICENSE, CHANGELOG, CONTRIBUTING, etc.
+        # ranked #1 for queries like "is the cli used" because they contain
+        # boilerplate text that matches common words.
+        "!LICENSE", "!CHANGELOG", "!CONTRIBUTING", "!AUTHORS",
+        "!CODEOWNERS", "!SECURITY", "!NOTICE", "!COPYING",
     )
 
     def __init__(self, rg_path: str = "rg", max_results: int = 50) -> None:

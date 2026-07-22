@@ -2534,14 +2534,17 @@ struct OverlayView: View {
                         // 20% chance of personality-flavored result header
                         if n > 0 && CompyMessagePool.shouldUsePersonality() {
                             let template = CompyMessagePool.pick(from: CompyMessagePool.resultHeaders, category: "resultHeaders")
-                            if template.contains("%@") {
+                            // Only splice source label when the template has two %@
+                            // placeholders — one for the source name and one for
+                            // pluralization.  Templates with a single %@ (e.g.
+                            // "%d reference%@, served up.") use %@ ONLY for the
+                            // plural "s"/"" — replacing it with "Heuristic" produces
+                            // "31 referenceHeuristic, served up." which is wrong.
+                            let atCount = template.components(separatedBy: "%@").count - 1
+                            if atCount >= 2, let range = template.range(of: "%@") {
                                 let source = state.sourceLabel.capitalized
-                                if let range = template.range(of: "%@") {
-                                    let replaced = template.replacingCharacters(in: range, with: source)
-                                    state.resultHeaderText = String(format: replaced, n, n == 1 ? "" : "s")
-                                } else {
-                                    state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
-                                }
+                                let replaced = template.replacingCharacters(in: range, with: source)
+                                state.resultHeaderText = String(format: replaced, n, n == 1 ? "" : "s")
                             } else {
                                 state.resultHeaderText = String(format: template, n, n == 1 ? "" : "s")
                             }

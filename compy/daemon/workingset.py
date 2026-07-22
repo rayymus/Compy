@@ -409,12 +409,16 @@ class WorkingSet:
     # ── Next-question suggestions ──────────────────────────────────────────
 
     def generate_next_questions(
-        self, graph: nx.DiGraph | None
+        self, graph: nx.DiGraph | None, current_symbol: str | None = None
     ) -> list[str]:
         """Generate 0–3 next-question suggestions from top active nodes.
 
         Uses graph structure: caller count, callee count, dead-code hints.
         Returns empty if no activation or no graph.
+
+        If ``current_symbol`` is provided, questions containing that symbol
+        are skipped — prevents suggesting "Who calls clamp?" immediately
+        after the user just asked that exact question.
         """
         if not self._activation or graph is None:
             return []
@@ -448,18 +452,23 @@ class WorkingSet:
             callees = list(graph.successors(node_id))
 
             if len(callers) > 5:
-                questions.append(
-                    f"{short} is called in {len(callers)} places — see them?"
-                )
+                q = f"{short} is called in {len(callers)} places — see them?"
             elif len(callers) > 0:
-                questions.append(f"Who calls {short}?")
+                q = f"Who calls {short}?"
             elif len(callers) == 0:
-                questions.append(f"Is {short} still used?")
+                q = f"Is {short} still used?"
+            else:
+                q = ""
+            # Skip questions about the same symbol the user just asked about.
+            if q and (current_symbol is None or current_symbol.lower() not in q.lower()):
+                questions.append(q)
 
             if len(questions) >= MAX_NEXT_QUESTIONS:
                 break
             if len(callees) > 3:
-                questions.append(f"What does {short} call?")
+                cq = f"What does {short} call?"
+                if current_symbol is None or current_symbol.lower() not in cq.lower():
+                    questions.append(cq)
 
         return questions[:MAX_NEXT_QUESTIONS]
 
